@@ -216,6 +216,10 @@ fn is_multiline_scalar(line: &str) -> bool {
 }
 
 /// Quote a YAML value if it contains special characters.
+pub fn quote_value(value: &str) -> String {
+    yaml_quote_value(value)
+}
+
 fn yaml_quote_value(value: &str) -> String {
     let needs_quoting = value.contains(':')
         || value.contains('#')

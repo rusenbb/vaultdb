@@ -123,6 +123,23 @@ Multiple `--where` flags are AND-ed. Use `||` within a single `--where` for OR:
 --where "status = active || status = pending"
 ```
 
+### Create
+
+```bash
+# Create a note from a template
+vaultdb create 3-Notes --template "templates/Movie Notes.md" --name "Arrival" --set "director=Denis Villeneuve" --set "year=2016"
+
+# Create without a template (minimal frontmatter)
+vaultdb create 3-Notes --name "Computer Vision" --set "tags=type/concept"
+
+# Batch create from unresolved links
+vaultdb unresolved 3-Notes --from BERT --depth 2 | ... | while read name; do
+  vaultdb create 3-Notes --template templates/concept.md --name "$name"
+done
+```
+
+The `--template` path is relative to vault root. Any `.md` file works as a template — vaultdb reads it, applies `--set` overrides to frontmatter, and writes the result.
+
 ### Count, Fields, Tags
 
 ```bash

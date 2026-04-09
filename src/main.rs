@@ -126,6 +126,20 @@ fn run() -> Result<()> {
             cli.verbose,
         ),
 
+        Command::Create {
+            folder,
+            name,
+            template,
+            set,
+        } => commands::create::run_create(
+            &vault,
+            folder,
+            name,
+            template.as_deref(),
+            set,
+            cli.dry_run,
+        ),
+
         Command::Rename {
             old_name,
             new_name,

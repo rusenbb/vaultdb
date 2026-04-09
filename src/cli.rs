@@ -153,6 +153,24 @@ pub enum Command {
         select: Option<String>,
     },
 
+    /// Create a new note, optionally from a template
+    Create {
+        /// Target folder (relative to vault root)
+        folder: String,
+
+        /// Note name (becomes the filename without .md)
+        #[arg(long)]
+        name: String,
+
+        /// Template file path (relative to vault root)
+        #[arg(long)]
+        template: Option<String>,
+
+        /// Set frontmatter fields (FIELD=VALUE), applied on top of template
+        #[arg(long, num_args = 1)]
+        set: Vec<String>,
+    },
+
     /// Rename a note and auto-update all wiki-links across the vault
     Rename {
         /// Current note name (filename without .md)
