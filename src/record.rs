@@ -53,7 +53,27 @@ impl Record {
                         .map(|(_, v)| v)
                 })
             }
+            "_length" => {
+                let content = self.load_content();
+                Some(FieldValue::Integer(content.len() as i64))
+            }
+            "_body_length" => {
+                let content = self.load_content();
+                let body_len = crate::frontmatter::extract_frontmatter(&content)
+                    .map(|(_, body_start)| content[body_start..].trim().len())
+                    .unwrap_or(content.trim().len());
+                Some(FieldValue::Integer(body_len as i64))
+            }
             _ => self.fields.get(key).cloned(),
+        }
+    }
+
+    /// Get file content — from raw_content if loaded, otherwise read from disk.
+    fn load_content(&self) -> String {
+        if let Some(ref content) = self.raw_content {
+            content.clone()
+        } else {
+            std::fs::read_to_string(&self.path).unwrap_or_default()
         }
     }
 
