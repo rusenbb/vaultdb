@@ -1,5 +1,7 @@
 ---
-description: Query, mutate, and traverse Obsidian vaults using vaultdb — a markdown database engine with citation graph support
+name: vaultdb
+description: Query, mutate, and traverse Obsidian vaults using vaultdb — a markdown database engine with citation graph support. Use when the user asks to query notes, find orphans, explore the knowledge graph, update frontmatter, or manage their vault.
+allowed-tools: Bash(vaultdb *)
 ---
 
 You have access to `vaultdb`, a CLI tool that treats folders of markdown files as a document database. YAML frontmatter fields are queryable columns, `[[wiki-links]]` form a citation graph.

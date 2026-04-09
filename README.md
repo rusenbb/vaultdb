@@ -262,6 +262,18 @@ Two-parser architecture: `serde_yaml` for fast reads, line-by-line string manipu
 - Writer detects and refuses to modify flow-style YAML (`[a, b]`) or multiline scalars (`|`, `>`)
 - Files without frontmatter are loaded with empty fields (queryable by virtual fields, never silently skipped)
 
+## Claude Code integration
+
+vaultdb ships with a [Claude Code](https://claude.ai/code) skill so LLM agents can use it directly. To install:
+
+```bash
+# Copy the skill to your personal skills directory
+mkdir -p ~/.claude/skills/vaultdb
+cp skills/vaultdb/SKILL.md ~/.claude/skills/vaultdb/SKILL.md
+```
+
+Then in any Claude Code session, the agent can invoke `/vaultdb` or use it automatically when you ask about your vault.
+
 ## Not Obsidian-specific
 
 Despite being designed for Obsidian vaults, vaultdb works with any folder of `.md` files with YAML frontmatter. Hugo, Jekyll, Astro, Zola, or any static site generator's content directory is a valid target.

@@ -1,0 +1,10 @@
+{
+  "name": "vaultdb",
+  "description": "Query, mutate, and traverse Obsidian vaults using vaultdb — a markdown database engine with citation graph support",
+  "version": "0.1.0",
+  "author": {
+    "name": "Rusen Birben"
+  },
+  "homepage": "https://github.com/rusenbb/vaultdb",
+  "repository": "https://github.com/rusenbb/vaultdb"
+}
