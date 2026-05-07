@@ -1,5 +1,7 @@
 # vaultdb
 
+[![crates.io](https://img.shields.io/crates/v/vaultdb.svg)](https://crates.io/crates/vaultdb)
+
 A database engine for your markdown files. Query, filter, mutate, and traverse [Obsidian](https://obsidian.md) vaults (or any folder of `.md` files with YAML frontmatter) from the command line.
 
 ```
@@ -32,17 +34,16 @@ No daemon, no cache, no state files. Every command reads the current `.md` files
 ## Install
 
 ```bash
-# From source
+# From crates.io
+cargo install vaultdb
+
+# Or from source
 git clone https://github.com/rusenbb/vaultdb.git
 cd vaultdb
 cargo install --path .
-
-# Or just build
-cargo build --release
-# Binary at target/release/vaultdb
 ```
 
-Requires Rust 1.75+.
+Requires Rust 1.75+. Published at <https://crates.io/crates/vaultdb>.
 
 ## Quick start
 
