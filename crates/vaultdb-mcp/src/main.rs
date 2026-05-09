@@ -9,7 +9,9 @@ mod server;
 
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::Parser;
+use rmcp::{ServiceExt, transport::stdio};
 use vaultdb_core::vault::Vault;
 
 /// CLI arguments for the MCP server.
@@ -38,10 +40,30 @@ fn resolve_vault(cli: &Cli) -> Option<Vault> {
     Vault::discover(&cwd).ok()
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Logs go to stderr so they don't pollute the JSON-RPC framing on
+    // stdout. RUST_LOG controls verbosity (default: warn).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "warn".into()),
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
+
     let cli = Cli::parse();
     let vault = resolve_vault(&cli);
-    let _server = server::VaultdbServer::new(vault);
-    eprintln!("vaultdb-mcp scaffold OK (Task 2)");
+    let server = server::VaultdbServer::new(vault);
+
+    let running = server
+        .serve(stdio())
+        .await
+        .context("failed to start MCP server over stdio")?;
+    running
+        .waiting()
+        .await
+        .context("MCP server exited with error")?;
     Ok(())
 }
