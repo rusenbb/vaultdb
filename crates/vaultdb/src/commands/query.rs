@@ -7,7 +7,7 @@ use crate::cli::OutputFormat;
 use vaultdb_core::filter::{WhereClause, WhereExpr, matches_all_with_links, matches_exprs_with_links};
 use vaultdb_core::links::LinkIndex;
 use crate::output;
-use vaultdb_core::record::{FieldValue, Record};
+use vaultdb_core::record::{Value, Record};
 use vaultdb_core::vault::Vault;
 
 const GRAPH_FIELDS: &[&str] = &["_links", "_link_count", "_backlinks", "_backlink_count"];
@@ -263,7 +263,7 @@ pub fn run_fields(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -
             let info = field_info.entry(key.clone()).or_default();
             info.total += 1;
             let type_name = value.type_name().to_string();
-            if !matches!(value, FieldValue::Null) {
+            if !matches!(value, Value::Null) {
                 info.non_null += 1;
             }
             *info.types.entry(type_name).or_insert(0) += 1;
@@ -308,9 +308,9 @@ pub fn run_tags(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> 
     let mut tag_counts: BTreeMap<String, usize> = BTreeMap::new();
 
     for record in &records {
-        if let Some(FieldValue::List(tags)) = record.fields.get("tags") {
+        if let Some(Value::List(tags)) = record.fields.get("tags") {
             for tag in tags {
-                if let FieldValue::String(s) = tag {
+                if let Value::String(s) = tag {
                     *tag_counts.entry(s.clone()).or_insert(0) += 1;
                 }
             }
@@ -345,14 +345,14 @@ fn parse_where_clauses(strs: &[String]) -> Result<Vec<WhereClause>> {
         .collect()
 }
 
-fn compare_field_values(a: Option<&FieldValue>, b: Option<&FieldValue>) -> std::cmp::Ordering {
+fn compare_field_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
     match (a, b) {
         (None, None) => std::cmp::Ordering::Equal,
         (None, Some(_)) => std::cmp::Ordering::Less,
         (Some(_), None) => std::cmp::Ordering::Greater,
-        (Some(FieldValue::Null), Some(FieldValue::Null)) => std::cmp::Ordering::Equal,
-        (Some(FieldValue::Null), _) => std::cmp::Ordering::Less,
-        (_, Some(FieldValue::Null)) => std::cmp::Ordering::Greater,
+        (Some(Value::Null), Some(Value::Null)) => std::cmp::Ordering::Equal,
+        (Some(Value::Null), _) => std::cmp::Ordering::Less,
+        (_, Some(Value::Null)) => std::cmp::Ordering::Greater,
         (Some(a), Some(b)) => {
             // Try numeric comparison
             if let (Some(fa), Some(fb)) = (a.as_float(), b.as_float()) {

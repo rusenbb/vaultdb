@@ -3,7 +3,7 @@ use std::path::Path;
 use regex::Regex;
 
 use crate::error::{Result, VaultdbError};
-use crate::record::{FieldValue, Record};
+use crate::record::{Value, Record};
 
 #[derive(Debug, Clone)]
 pub enum CompareOp {
@@ -199,10 +199,10 @@ impl WhereExpr {
 
         match self.op {
             CompareOp::Exists => {
-                matches!(field_val, Some(v) if !matches!(v, FieldValue::Null))
+                matches!(field_val, Some(v) if !matches!(v, Value::Null))
             }
             CompareOp::Missing => {
-                matches!(field_val, None | Some(FieldValue::Null))
+                matches!(field_val, None | Some(Value::Null))
             }
             _ => {
                 let rhs = match &self.value {
@@ -211,7 +211,7 @@ impl WhereExpr {
                 };
 
                 match field_val {
-                    None | Some(FieldValue::Null) => {
+                    None | Some(Value::Null) => {
                         // Null field: only matches "= " (empty) or "missing"
                         matches!(self.op, CompareOp::Eq) && rhs.is_empty()
                     }
@@ -221,7 +221,7 @@ impl WhereExpr {
         }
     }
 
-    fn compare_value(&self, lhs: &FieldValue, rhs: &str) -> bool {
+    fn compare_value(&self, lhs: &Value, rhs: &str) -> bool {
         match self.op {
             CompareOp::Contains => lhs.list_contains(rhs),
             CompareOp::StartsWith => lhs.display_value().starts_with(rhs),
@@ -305,11 +305,11 @@ pub fn matches_exprs_with_links(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::FieldValue;
+    use crate::record::Value;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    fn make_record(fields: Vec<(&str, FieldValue)>) -> Record {
+    fn make_record(fields: Vec<(&str, Value)>) -> Record {
         let mut map = BTreeMap::new();
         for (k, v) in fields {
             map.insert(k.to_string(), v);
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn eval_eq_string() {
-        let record = make_record(vec![("status", FieldValue::String("to-watch".into()))]);
+        let record = make_record(vec![("status", Value::String("to-watch".into()))]);
         let expr = WhereExpr::parse("status = to-watch").unwrap();
         assert!(expr.matches(&record, &vault_root()));
 
@@ -406,14 +406,14 @@ mod tests {
 
     #[test]
     fn eval_neq() {
-        let record = make_record(vec![("status", FieldValue::String("draft".into()))]);
+        let record = make_record(vec![("status", Value::String("draft".into()))]);
         let expr = WhereExpr::parse("status != active").unwrap();
         assert!(expr.matches(&record, &vault_root()));
     }
 
     #[test]
     fn eval_numeric_gt() {
-        let record = make_record(vec![("hsk", FieldValue::Integer(3))]);
+        let record = make_record(vec![("hsk", Value::Integer(3))]);
         let expr = WhereExpr::parse("hsk > 2").unwrap();
         assert!(expr.matches(&record, &vault_root()));
 
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn eval_numeric_lte() {
-        let record = make_record(vec![("year", FieldValue::Integer(2019))]);
+        let record = make_record(vec![("year", Value::Integer(2019))]);
         let expr = WhereExpr::parse("year <= 2020").unwrap();
         assert!(expr.matches(&record, &vault_root()));
 
@@ -435,9 +435,9 @@ mod tests {
     fn eval_list_contains() {
         let record = make_record(vec![(
             "tags",
-            FieldValue::List(vec![
-                FieldValue::String("type/concept".into()),
-                FieldValue::String("topic/chinese".into()),
+            Value::List(vec![
+                Value::String("type/concept".into()),
+                Value::String("topic/chinese".into()),
             ]),
         )]);
         let expr = WhereExpr::parse("tags contains topic/chinese").unwrap();
@@ -449,21 +449,21 @@ mod tests {
 
     #[test]
     fn eval_string_contains_substring() {
-        let record = make_record(vec![("director", FieldValue::String("Sam Mendes".into()))]);
+        let record = make_record(vec![("director", Value::String("Sam Mendes".into()))]);
         let expr = WhereExpr::parse("director contains Mendes").unwrap();
         assert!(expr.matches(&record, &vault_root()));
     }
 
     #[test]
     fn eval_exists_on_non_null() {
-        let record = make_record(vec![("status", FieldValue::String("active".into()))]);
+        let record = make_record(vec![("status", Value::String("active".into()))]);
         let expr = WhereExpr::parse("status exists").unwrap();
         assert!(expr.matches(&record, &vault_root()));
     }
 
     #[test]
     fn eval_exists_on_null() {
-        let record = make_record(vec![("rating", FieldValue::Null)]);
+        let record = make_record(vec![("rating", Value::Null)]);
         let expr = WhereExpr::parse("rating exists").unwrap();
         assert!(!expr.matches(&record, &vault_root()));
     }
@@ -477,14 +477,14 @@ mod tests {
 
     #[test]
     fn eval_missing_on_null() {
-        let record = make_record(vec![("rating", FieldValue::Null)]);
+        let record = make_record(vec![("rating", Value::Null)]);
         let expr = WhereExpr::parse("rating missing").unwrap();
         assert!(expr.matches(&record, &vault_root()));
     }
 
     #[test]
     fn eval_matches_regex() {
-        let record = make_record(vec![("director", FieldValue::String("Sam Mendes".into()))]);
+        let record = make_record(vec![("director", Value::String("Sam Mendes".into()))]);
         let expr = WhereExpr::parse("director matches ^Sam").unwrap();
         assert!(expr.matches(&record, &vault_root()));
 
@@ -519,12 +519,12 @@ mod tests {
         let record = make_record(vec![
             (
                 "tags",
-                FieldValue::List(vec![
-                    FieldValue::String("type/concept".into()),
-                    FieldValue::String("topic/chinese".into()),
+                Value::List(vec![
+                    Value::String("type/concept".into()),
+                    Value::String("topic/chinese".into()),
                 ]),
             ),
-            ("hsk", FieldValue::Integer(1)),
+            ("hsk", Value::Integer(1)),
         ]);
         let clauses = vec![
             WhereClause::parse("tags contains topic/chinese").unwrap(),
@@ -560,9 +560,9 @@ mod tests {
     fn eval_not_contains() {
         let record = make_record(vec![(
             "tags",
-            FieldValue::List(vec![
-                FieldValue::String("type/concept".into()),
-                FieldValue::String("topic/chinese".into()),
+            Value::List(vec![
+                Value::String("type/concept".into()),
+                Value::String("topic/chinese".into()),
             ]),
         )]);
 
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn eval_not_exists() {
-        let record = make_record(vec![("status", FieldValue::String("active".into()))]);
+        let record = make_record(vec![("status", Value::String("active".into()))]);
 
         // status exists, so !exists should be false
         let expr = WhereExpr::parse("status !exists").unwrap();
@@ -590,7 +590,7 @@ mod tests {
 
     #[test]
     fn eval_not_startswith() {
-        let record = make_record(vec![("status", FieldValue::String("to-watch".into()))]);
+        let record = make_record(vec![("status", Value::String("to-watch".into()))]);
         let expr = WhereExpr::parse("status !startswith to").unwrap();
         assert!(!expr.matches(&record, &vault_root()));
 
@@ -610,21 +610,21 @@ mod tests {
 
     #[test]
     fn eval_or_first_matches() {
-        let record = make_record(vec![("status", FieldValue::String("to-watch".into()))]);
+        let record = make_record(vec![("status", Value::String("to-watch".into()))]);
         let clause = WhereClause::parse("status = to-watch || status = watching").unwrap();
         assert!(clause.matches_with_links(&record, &vault_root(), None));
     }
 
     #[test]
     fn eval_or_second_matches() {
-        let record = make_record(vec![("status", FieldValue::String("watching".into()))]);
+        let record = make_record(vec![("status", Value::String("watching".into()))]);
         let clause = WhereClause::parse("status = to-watch || status = watching").unwrap();
         assert!(clause.matches_with_links(&record, &vault_root(), None));
     }
 
     #[test]
     fn eval_or_none_matches() {
-        let record = make_record(vec![("status", FieldValue::String("watched".into()))]);
+        let record = make_record(vec![("status", Value::String("watched".into()))]);
         let clause = WhereClause::parse("status = to-watch || status = watching").unwrap();
         assert!(!clause.matches_with_links(&record, &vault_root(), None));
     }
@@ -632,8 +632,8 @@ mod tests {
     #[test]
     fn eval_and_of_or_clauses() {
         let record = make_record(vec![
-            ("status", FieldValue::String("to-watch".into())),
-            ("year", FieldValue::Integer(2019)),
+            ("status", Value::String("to-watch".into())),
+            ("year", Value::Integer(2019)),
         ]);
 
         let clauses = vec![

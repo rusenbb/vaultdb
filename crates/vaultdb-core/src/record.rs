@@ -3,15 +3,16 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// A value from YAML frontmatter, preserving type information.
-#[derive(Debug, Clone, PartialEq)]
-pub enum FieldValue {
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Value {
     Null,
     String(String),
     Integer(i64),
     Float(f64),
     Bool(bool),
-    List(Vec<FieldValue>),
-    Map(BTreeMap<String, FieldValue>),
+    List(Vec<Value>),
+    Map(BTreeMap<String, Value>),
 }
 
 /// One parsed .md file = one record.
@@ -20,14 +21,14 @@ pub struct Record {
     /// Absolute path to the .md file.
     pub path: PathBuf,
     /// Parsed frontmatter fields.
-    pub fields: BTreeMap<String, FieldValue>,
+    pub fields: BTreeMap<String, Value>,
     /// Raw file content — only loaded for write operations.
     pub raw_content: Option<String>,
 }
 
 impl Record {
     /// Look up a field by name, checking virtual fields first.
-    pub fn get(&self, key: &str, vault_root: &Path) -> Option<FieldValue> {
+    pub fn get(&self, key: &str, vault_root: &Path) -> Option<Value> {
         self.get_with_links(key, vault_root, None)
     }
 
@@ -37,13 +38,13 @@ impl Record {
         key: &str,
         vault_root: &Path,
         link_index: Option<&crate::links::LinkIndex>,
-    ) -> Option<FieldValue> {
+    ) -> Option<Value> {
         match key {
-            "_name" => Some(FieldValue::String(self.virtual_name())),
-            "_path" => Some(FieldValue::String(self.virtual_path(vault_root))),
-            "_folder" => Some(FieldValue::String(self.virtual_folder())),
-            "_modified" => self.virtual_modified().map(FieldValue::String),
-            "_created" => self.virtual_created().map(FieldValue::String),
+            "_name" => Some(Value::String(self.virtual_name())),
+            "_path" => Some(Value::String(self.virtual_path(vault_root))),
+            "_folder" => Some(Value::String(self.virtual_folder())),
+            "_modified" => self.virtual_modified().map(Value::String),
+            "_created" => self.virtual_created().map(Value::String),
             "_links" | "_link_count" | "_backlinks" | "_backlink_count" => {
                 let name = self.virtual_name();
                 link_index.and_then(|idx| {
@@ -55,14 +56,14 @@ impl Record {
             }
             "_length" => {
                 let content = self.load_content();
-                Some(FieldValue::Integer(content.len() as i64))
+                Some(Value::Integer(content.len() as i64))
             }
             "_body_length" => {
                 let content = self.load_content();
                 let body_len = crate::frontmatter::extract_frontmatter(&content)
                     .map(|(_, body_start)| content[body_start..].trim().len())
                     .unwrap_or(content.trim().len());
-                Some(FieldValue::Integer(body_len as i64))
+                Some(Value::Integer(body_len as i64))
             }
             _ => self.fields.get(key).cloned(),
         }
@@ -177,11 +178,11 @@ fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
-impl FieldValue {
+impl Value {
     /// Try to get a string reference.
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            FieldValue::String(s) => Some(s),
+            Value::String(s) => Some(s),
             _ => None,
         }
     }
@@ -189,9 +190,9 @@ impl FieldValue {
     /// Try to interpret as i64 (from Integer, or by parsing a String).
     pub fn as_integer(&self) -> Option<i64> {
         match self {
-            FieldValue::Integer(n) => Some(*n),
-            FieldValue::Float(f) => Some(*f as i64),
-            FieldValue::String(s) => s.parse().ok(),
+            Value::Integer(n) => Some(*n),
+            Value::Float(f) => Some(*f as i64),
+            Value::String(s) => s.parse().ok(),
             _ => None,
         }
     }
@@ -199,9 +200,9 @@ impl FieldValue {
     /// Try to interpret as f64.
     pub fn as_float(&self) -> Option<f64> {
         match self {
-            FieldValue::Float(f) => Some(*f),
-            FieldValue::Integer(n) => Some(*n as f64),
-            FieldValue::String(s) => s.parse().ok(),
+            Value::Float(f) => Some(*f),
+            Value::Integer(n) => Some(*n as f64),
+            Value::String(s) => s.parse().ok(),
             _ => None,
         }
     }
@@ -209,8 +210,8 @@ impl FieldValue {
     /// Check if this value (as a List) contains an item matching the needle string.
     pub fn list_contains(&self, needle: &str) -> bool {
         match self {
-            FieldValue::List(items) => items.iter().any(|item| item.display_value() == needle),
-            FieldValue::String(s) => s.contains(needle),
+            Value::List(items) => items.iter().any(|item| item.display_value() == needle),
+            Value::String(s) => s.contains(needle),
             _ => false,
         }
     }
@@ -218,29 +219,29 @@ impl FieldValue {
     /// Human-readable type name.
     pub fn type_name(&self) -> &'static str {
         match self {
-            FieldValue::Null => "null",
-            FieldValue::String(_) => "string",
-            FieldValue::Integer(_) => "integer",
-            FieldValue::Float(_) => "float",
-            FieldValue::Bool(_) => "bool",
-            FieldValue::List(_) => "list",
-            FieldValue::Map(_) => "map",
+            Value::Null => "null",
+            Value::String(_) => "string",
+            Value::Integer(_) => "integer",
+            Value::Float(_) => "float",
+            Value::Bool(_) => "bool",
+            Value::List(_) => "list",
+            Value::Map(_) => "map",
         }
     }
 
     /// Display-friendly string representation.
     pub fn display_value(&self) -> String {
         match self {
-            FieldValue::Null => String::new(),
-            FieldValue::String(s) => s.clone(),
-            FieldValue::Integer(n) => n.to_string(),
-            FieldValue::Float(f) => f.to_string(),
-            FieldValue::Bool(b) => b.to_string(),
-            FieldValue::List(items) => {
+            Value::Null => String::new(),
+            Value::String(s) => s.clone(),
+            Value::Integer(n) => n.to_string(),
+            Value::Float(f) => f.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::List(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.display_value()).collect();
                 parts.join(", ")
             }
-            FieldValue::Map(m) => {
+            Value::Map(m) => {
                 let parts: Vec<String> = m
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, v.display_value()))
@@ -253,16 +254,45 @@ impl FieldValue {
     /// Whether this value is null or an empty collection.
     pub fn is_empty(&self) -> bool {
         match self {
-            FieldValue::Null => true,
-            FieldValue::String(s) => s.is_empty(),
-            FieldValue::List(l) => l.is_empty(),
-            FieldValue::Map(m) => m.is_empty(),
+            Value::Null => true,
+            Value::String(s) => s.is_empty(),
+            Value::List(l) => l.is_empty(),
+            Value::Map(m) => m.is_empty(),
             _ => false,
         }
     }
+
+    /// Returns the inner bool if this is `Value::Bool`, else `None`.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner list if this is `Value::List`, else `None`.
+    pub fn as_list(&self) -> Option<&[Value]> {
+        match self {
+            Value::List(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner map if this is `Value::Map`, else `None`.
+    pub fn as_map(&self) -> Option<&std::collections::BTreeMap<String, Value>> {
+        match self {
+            Value::Map(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this value is `Value::Null`.
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
 }
 
-impl std::fmt::Display for FieldValue {
+impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.display_value())
     }
@@ -317,9 +347,9 @@ mod tests {
 
     #[test]
     fn field_value_list_contains() {
-        let val = FieldValue::List(vec![
-            FieldValue::String("type/concept".into()),
-            FieldValue::String("topic/chinese".into()),
+        let val = Value::List(vec![
+            Value::String("type/concept".into()),
+            Value::String("topic/chinese".into()),
         ]);
         assert!(val.list_contains("topic/chinese"));
         assert!(!val.list_contains("topic/movies"));
@@ -327,37 +357,102 @@ mod tests {
 
     #[test]
     fn field_value_string_contains_substring() {
-        let val = FieldValue::String("hello world".into());
+        let val = Value::String("hello world".into());
         assert!(val.list_contains("world"));
     }
 
     #[test]
     fn field_value_type_names() {
-        assert_eq!(FieldValue::Null.type_name(), "null");
-        assert_eq!(FieldValue::Integer(5).type_name(), "integer");
-        assert_eq!(FieldValue::String("x".into()).type_name(), "string");
-        assert_eq!(FieldValue::List(vec![]).type_name(), "list");
+        assert_eq!(Value::Null.type_name(), "null");
+        assert_eq!(Value::Integer(5).type_name(), "integer");
+        assert_eq!(Value::String("x".into()).type_name(), "string");
+        assert_eq!(Value::List(vec![]).type_name(), "list");
     }
 
     #[test]
     fn field_value_numeric_coercion() {
-        assert_eq!(FieldValue::Integer(42).as_float(), Some(42.0));
-        assert_eq!(FieldValue::Float(3.14).as_integer(), Some(3));
-        assert_eq!(FieldValue::String("7".into()).as_integer(), Some(7));
-        assert_eq!(FieldValue::String("not a number".into()).as_integer(), None);
+        assert_eq!(Value::Integer(42).as_float(), Some(42.0));
+        assert_eq!(Value::Float(3.14).as_integer(), Some(3));
+        assert_eq!(Value::String("7".into()).as_integer(), Some(7));
+        assert_eq!(Value::String("not a number".into()).as_integer(), None);
     }
 
     #[test]
     fn display_value_formatting() {
-        assert_eq!(FieldValue::Null.display_value(), "");
-        assert_eq!(FieldValue::Integer(2019).display_value(), "2019");
+        assert_eq!(Value::Null.display_value(), "");
+        assert_eq!(Value::Integer(2019).display_value(), "2019");
         assert_eq!(
-            FieldValue::List(vec![
-                FieldValue::String("a".into()),
-                FieldValue::String("b".into()),
+            Value::List(vec![
+                Value::String("a".into()),
+                Value::String("b".into()),
             ])
             .display_value(),
             "a, b"
+        );
+    }
+
+    #[test]
+    fn value_helpers_string() {
+        let v = Value::String("hi".into());
+        assert_eq!(v.as_str(), Some("hi"));
+        assert_eq!(v.as_integer(), None);
+        assert!(!v.is_null());
+    }
+
+    #[test]
+    fn value_helpers_integer() {
+        let v = Value::Integer(7);
+        assert_eq!(v.as_integer(), Some(7));
+        assert_eq!(v.as_float(), Some(7.0));
+        assert!(!v.is_null());
+    }
+
+    #[test]
+    fn value_helpers_float() {
+        let v = Value::Float(1.5);
+        assert_eq!(v.as_float(), Some(1.5));
+    }
+
+    #[test]
+    fn value_helpers_bool() {
+        let v = Value::Bool(true);
+        assert_eq!(v.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn value_helpers_list() {
+        let v = Value::List(vec![Value::Integer(1), Value::Integer(2)]);
+        assert_eq!(v.as_list().map(|s| s.len()), Some(2));
+    }
+
+    #[test]
+    fn value_helpers_map() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("k".into(), Value::String("v".into()));
+        let v = Value::Map(m);
+        assert_eq!(v.as_map().map(|m| m.len()), Some(1));
+    }
+
+    #[test]
+    fn value_helpers_null() {
+        let v = Value::Null;
+        assert!(v.is_null());
+        assert_eq!(v.as_str(), None);
+    }
+
+    #[test]
+    fn value_serializes_untagged() {
+        let v = Value::List(vec![Value::Integer(1), Value::String("x".into())]);
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#"[1,"x"]"#);
+    }
+
+    #[test]
+    fn value_deserializes_untagged() {
+        let v: Value = serde_json::from_str(r#"[1,"x"]"#).unwrap();
+        assert_eq!(
+            v,
+            Value::List(vec![Value::Integer(1), Value::String("x".into())])
         );
     }
 }

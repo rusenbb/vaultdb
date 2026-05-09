@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::{Result, VaultdbError};
-use crate::record::{FieldValue, Record};
+use crate::record::{Value, Record};
 
 /// Extract the raw frontmatter string from markdown content.
 ///
@@ -83,7 +83,7 @@ pub fn extract_frontmatter(content: &str) -> Option<(&str, usize)> {
 }
 
 /// Parse a frontmatter YAML string into a field map.
-pub fn parse_frontmatter(yaml_text: &str) -> Result<BTreeMap<String, FieldValue>> {
+pub fn parse_frontmatter(yaml_text: &str) -> Result<BTreeMap<String, Value>> {
     if yaml_text.trim().is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -108,23 +108,23 @@ pub fn parse_frontmatter(yaml_text: &str) -> Result<BTreeMap<String, FieldValue>
     }
 }
 
-/// Convert a serde_yaml::Value to our FieldValue enum.
-fn yaml_to_field_value(value: serde_yaml::Value) -> FieldValue {
+/// Convert a serde_yaml::Value to our Value enum.
+fn yaml_to_field_value(value: serde_yaml::Value) -> Value {
     match value {
-        serde_yaml::Value::Null => FieldValue::Null,
-        serde_yaml::Value::Bool(b) => FieldValue::Bool(b),
+        serde_yaml::Value::Null => Value::Null,
+        serde_yaml::Value::Bool(b) => Value::Bool(b),
         serde_yaml::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                FieldValue::Integer(i)
+                Value::Integer(i)
             } else if let Some(f) = n.as_f64() {
-                FieldValue::Float(f)
+                Value::Float(f)
             } else {
-                FieldValue::String(n.to_string())
+                Value::String(n.to_string())
             }
         }
-        serde_yaml::Value::String(s) => FieldValue::String(s),
+        serde_yaml::Value::String(s) => Value::String(s),
         serde_yaml::Value::Sequence(seq) => {
-            FieldValue::List(seq.into_iter().map(yaml_to_field_value).collect())
+            Value::List(seq.into_iter().map(yaml_to_field_value).collect())
         }
         serde_yaml::Value::Mapping(map) => {
             let mut fields = BTreeMap::new();
@@ -135,7 +135,7 @@ fn yaml_to_field_value(value: serde_yaml::Value) -> FieldValue {
                 };
                 fields.insert(key, yaml_to_field_value(v));
             }
-            FieldValue::Map(fields)
+            Value::Map(fields)
         }
         serde_yaml::Value::Tagged(tagged) => yaml_to_field_value(tagged.value),
     }
@@ -236,21 +236,21 @@ related-to:
 
         assert_eq!(
             fields.get("status"),
-            Some(&FieldValue::String("to-watch".into()))
+            Some(&Value::String("to-watch".into()))
         );
-        assert_eq!(fields.get("rating"), Some(&FieldValue::Null));
+        assert_eq!(fields.get("rating"), Some(&Value::Null));
         assert_eq!(
             fields.get("director"),
-            Some(&FieldValue::String("Sam Mendes".into()))
+            Some(&Value::String("Sam Mendes".into()))
         );
-        assert_eq!(fields.get("year"), Some(&FieldValue::Integer(2019)));
+        assert_eq!(fields.get("year"), Some(&Value::Integer(2019)));
 
         // Tags should be a list
         match fields.get("tags") {
-            Some(FieldValue::List(tags)) => {
+            Some(Value::List(tags)) => {
                 assert_eq!(tags.len(), 6);
-                assert_eq!(tags[0], FieldValue::String("type/leaf".into()));
-                assert_eq!(tags[3], FieldValue::String("genre/drama".into()));
+                assert_eq!(tags[0], Value::String("type/leaf".into()));
+                assert_eq!(tags[3], Value::String("genre/drama".into()));
             }
             other => panic!("expected List for tags, got {:?}", other),
         }
@@ -285,22 +285,22 @@ related-to:
 
         assert_eq!(
             fields.get("pinyin"),
-            Some(&FieldValue::String("kuài".into()))
+            Some(&Value::String("kuài".into()))
         );
         assert_eq!(
             fields.get("anlam"),
-            Some(&FieldValue::String("hızlı".into()))
+            Some(&Value::String("hızlı".into()))
         );
-        assert_eq!(fields.get("hsk"), Some(&FieldValue::Integer(1)));
+        assert_eq!(fields.get("hsk"), Some(&Value::Integer(1)));
 
         // kaliplar should be a list of maps
         match fields.get("kaliplar") {
-            Some(FieldValue::List(items)) => {
+            Some(Value::List(items)) => {
                 assert_eq!(items.len(), 2);
                 match &items[0] {
-                    FieldValue::Map(m) => {
-                        assert_eq!(m.get("kalip"), Some(&FieldValue::String("快乐".into())));
-                        assert_eq!(m.get("pinyin"), Some(&FieldValue::String("kuàilè".into())));
+                    Value::Map(m) => {
+                        assert_eq!(m.get("kalip"), Some(&Value::String("快乐".into())));
+                        assert_eq!(m.get("pinyin"), Some(&Value::String("kuàilè".into())));
                     }
                     other => panic!("expected Map in kaliplar, got {:?}", other),
                 }
@@ -321,9 +321,9 @@ related-to:
         let fields = parse_frontmatter(yaml).unwrap();
 
         match fields.get("related-to") {
-            Some(FieldValue::List(items)) => {
+            Some(Value::List(items)) => {
                 assert_eq!(items.len(), 2);
-                assert_eq!(items[0], FieldValue::String("[[2FA Setup - Yubi]]".into()));
+                assert_eq!(items[0], Value::String("[[2FA Setup - Yubi]]".into()));
             }
             other => panic!("expected List for related-to, got {:?}", other),
         }
@@ -333,8 +333,8 @@ related-to:
     fn parse_null_aliases_and_related_to() {
         let yaml = "aliases:\ntags:\n  - type/concept\nrelated-to:\n";
         let fields = parse_frontmatter(yaml).unwrap();
-        assert_eq!(fields.get("aliases"), Some(&FieldValue::Null));
-        assert_eq!(fields.get("related-to"), Some(&FieldValue::Null));
+        assert_eq!(fields.get("aliases"), Some(&Value::Null));
+        assert_eq!(fields.get("related-to"), Some(&Value::Null));
     }
 
     #[test]
@@ -357,7 +357,7 @@ related-to:
 
         assert_eq!(
             fields.get("pinyin"),
-            Some(&FieldValue::String("kuài".into()))
+            Some(&Value::String("kuài".into()))
         );
         assert!(content[body_start..].contains("Body text."));
     }

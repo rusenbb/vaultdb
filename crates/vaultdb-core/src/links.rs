@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use regex::Regex;
 use std::sync::LazyLock;
 
-use crate::record::{FieldValue, Record};
+use crate::record::{Value, Record};
 
 #[derive(Debug, Clone)]
 pub enum TraverseDirection {
@@ -218,34 +218,34 @@ impl LinkIndex {
             .is_some_and(|links| links.contains(from))
     }
 
-    /// Get link data as FieldValues for virtual fields on a record.
-    pub fn virtual_fields(&self, name: &str) -> Vec<(&'static str, FieldValue)> {
+    /// Get link data as Values for virtual fields on a record.
+    pub fn virtual_fields(&self, name: &str) -> Vec<(&'static str, Value)> {
         let out_links = self.outgoing_links(name);
         let in_links = self.incoming_links(name);
 
         vec![
             (
                 "_links",
-                FieldValue::List(
+                Value::List(
                     out_links
                         .iter()
-                        .map(|s| FieldValue::String(s.to_string()))
+                        .map(|s| Value::String(s.to_string()))
                         .collect(),
                 ),
             ),
-            ("_link_count", FieldValue::Integer(out_links.len() as i64)),
+            ("_link_count", Value::Integer(out_links.len() as i64)),
             (
                 "_backlinks",
-                FieldValue::List(
+                Value::List(
                     in_links
                         .iter()
-                        .map(|s| FieldValue::String(s.to_string()))
+                        .map(|s| Value::String(s.to_string()))
                         .collect(),
                 ),
             ),
             (
                 "_backlink_count",
-                FieldValue::Integer(in_links.len() as i64),
+                Value::Integer(in_links.len() as i64),
             ),
         ]
     }
@@ -374,12 +374,12 @@ mod tests {
         let fields = index.virtual_fields("A");
 
         let link_count = fields.iter().find(|(k, _)| *k == "_link_count").unwrap();
-        assert_eq!(link_count.1, FieldValue::Integer(2));
+        assert_eq!(link_count.1, Value::Integer(2));
 
         let backlink_count = fields
             .iter()
             .find(|(k, _)| *k == "_backlink_count")
             .unwrap();
-        assert_eq!(backlink_count.1, FieldValue::Integer(1));
+        assert_eq!(backlink_count.1, Value::Integer(1));
     }
 }

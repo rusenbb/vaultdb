@@ -5,7 +5,7 @@ use comfy_table::{ContentArrangement, Table};
 
 use crate::cli::OutputFormat;
 use vaultdb_core::links::LinkIndex;
-use vaultdb_core::record::{FieldValue, Record};
+use vaultdb_core::record::{Value, Record};
 
 /// Format records for display.
 pub fn format_records(
@@ -94,7 +94,7 @@ fn format_json(
             for f in fields {
                 let val = r
                     .get_with_links(f, vault_root, link_index)
-                    .unwrap_or(FieldValue::Null);
+                    .unwrap_or(Value::Null);
                 map.insert(f.clone(), field_value_to_json(&val));
             }
             serde_json::Value::Object(map)
@@ -116,7 +116,7 @@ fn format_yaml(
         for f in fields {
             let val = record
                 .get_with_links(f, vault_root, link_index)
-                .unwrap_or(FieldValue::Null);
+                .unwrap_or(Value::Null);
             output.push_str(&format!("{}: {}\n", f, val.display_value()));
         }
     }
@@ -150,17 +150,17 @@ fn format_csv(
     String::from_utf8(buf).unwrap_or_default()
 }
 
-fn field_value_to_json(val: &FieldValue) -> serde_json::Value {
+fn field_value_to_json(val: &Value) -> serde_json::Value {
     match val {
-        FieldValue::Null => serde_json::Value::Null,
-        FieldValue::String(s) => serde_json::Value::String(s.clone()),
-        FieldValue::Integer(n) => serde_json::json!(n),
-        FieldValue::Float(f) => serde_json::json!(f),
-        FieldValue::Bool(b) => serde_json::Value::Bool(*b),
-        FieldValue::List(items) => {
+        Value::Null => serde_json::Value::Null,
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Integer(n) => serde_json::json!(n),
+        Value::Float(f) => serde_json::json!(f),
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::List(items) => {
             serde_json::Value::Array(items.iter().map(field_value_to_json).collect())
         }
-        FieldValue::Map(m) => {
+        Value::Map(m) => {
             let obj: serde_json::Map<String, serde_json::Value> = m
                 .iter()
                 .map(|(k, v)| (k.clone(), field_value_to_json(v)))
@@ -171,7 +171,7 @@ fn field_value_to_json(val: &FieldValue) -> serde_json::Value {
 }
 
 /// Truncate a display value for table cells.
-fn truncate_display(val: &FieldValue, max_len: usize) -> String {
+fn truncate_display(val: &Value, max_len: usize) -> String {
     let s = val.display_value();
     if s.chars().count() > max_len {
         let truncated: String = s.chars().take(max_len - 3).collect();

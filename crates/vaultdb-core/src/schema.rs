@@ -4,7 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VaultdbError};
-use crate::record::FieldValue;
+use crate::record::Value;
 
 /// Top-level schema file structure.
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,7 +68,7 @@ impl std::fmt::Display for Violation {
 /// Validate a record's fields against a collection schema.
 pub fn validate_record(
     filename: &str,
-    fields: &BTreeMap<String, FieldValue>,
+    fields: &BTreeMap<String, Value>,
     schema: &CollectionSchema,
 ) -> Vec<Violation> {
     let mut violations = Vec::new();
@@ -76,7 +76,7 @@ pub fn validate_record(
     // Check required fields
     for req in &schema.required {
         match fields.get(req) {
-            None | Some(FieldValue::Null) => {
+            None | Some(Value::Null) => {
                 violations.push(Violation {
                     file: filename.to_string(),
                     field: req.clone(),
@@ -90,7 +90,7 @@ pub fn validate_record(
     // Check field constraints
     for (field_name, field_schema) in &schema.fields {
         let value = match fields.get(field_name) {
-            Some(v) if !matches!(v, FieldValue::Null) => v,
+            Some(v) if !matches!(v, Value::Null) => v,
             _ => continue, // skip absent/null fields (required check handles those)
         };
 
@@ -198,7 +198,7 @@ pub fn infer_schema(folder_name: &str, records: &[crate::record::Record]) -> Col
 
             if !matches!(
                 value,
-                FieldValue::Null | FieldValue::List(_) | FieldValue::Map(_)
+                Value::Null | Value::List(_) | Value::Map(_)
             ) {
                 field_values
                     .entry(key.clone())
@@ -279,10 +279,10 @@ pub fn infer_schema(folder_name: &str, records: &[crate::record::Record]) -> Col
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{FieldValue, Record};
+    use crate::record::{Value, Record};
     use std::path::PathBuf;
 
-    fn make_record(fields: Vec<(&str, FieldValue)>) -> Record {
+    fn make_record(fields: Vec<(&str, Value)>) -> Record {
         let mut map = BTreeMap::new();
         for (k, v) in fields {
             map.insert(k.to_string(), v);
@@ -304,7 +304,7 @@ mod tests {
             fields: BTreeMap::new(),
         };
 
-        let record = make_record(vec![("tags", FieldValue::String("x".into()))]);
+        let record = make_record(vec![("tags", Value::String("x".into()))]);
         let violations = validate_record("test.md", &record.fields, &schema);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("required"));
@@ -332,7 +332,7 @@ mod tests {
             fields,
         };
 
-        let record = make_record(vec![("year", FieldValue::String("not a number".into()))]);
+        let record = make_record(vec![("year", Value::String("not a number".into()))]);
         let violations = validate_record("test.md", &record.fields, &schema);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("type"));
@@ -363,7 +363,7 @@ mod tests {
             fields,
         };
 
-        let record = make_record(vec![("status", FieldValue::String("invalid".into()))]);
+        let record = make_record(vec![("status", Value::String("invalid".into()))]);
         let violations = validate_record("test.md", &record.fields, &schema);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("not in allowed"));
@@ -391,7 +391,7 @@ mod tests {
             fields,
         };
 
-        let record = make_record(vec![("rating", FieldValue::Integer(15))]);
+        let record = make_record(vec![("rating", Value::Integer(15))]);
         let violations = validate_record("test.md", &record.fields, &schema);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("exceeds maximum"));
@@ -419,7 +419,7 @@ mod tests {
             fields,
         };
 
-        let record = make_record(vec![("status", FieldValue::String("to-watch".into()))]);
+        let record = make_record(vec![("status", Value::String("to-watch".into()))]);
         let violations = validate_record("test.md", &record.fields, &schema);
         assert!(violations.is_empty());
     }
@@ -428,12 +428,12 @@ mod tests {
     fn infer_schema_basic() {
         let records = vec![
             make_record(vec![
-                ("status", FieldValue::String("active".into())),
-                ("year", FieldValue::Integer(2020)),
+                ("status", Value::String("active".into())),
+                ("year", Value::Integer(2020)),
             ]),
             make_record(vec![
-                ("status", FieldValue::String("draft".into())),
-                ("year", FieldValue::Integer(2021)),
+                ("status", Value::String("draft".into())),
+                ("year", Value::Integer(2021)),
             ]),
         ];
 

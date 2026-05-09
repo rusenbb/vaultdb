@@ -8,3 +8,5 @@ pub mod record;
 pub mod schema;
 pub mod vault;
 pub mod writer;
+
+pub use record::{Record, Value};
