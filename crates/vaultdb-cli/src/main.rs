@@ -2,9 +2,7 @@
 
 mod cli;
 mod commands;
-mod filter;
 mod output;
-mod schema;
 mod vault;
 mod writer;
 

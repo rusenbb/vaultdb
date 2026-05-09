@@ -3,8 +3,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use vaultdb_core::error::{Result, VaultdbError};
-use vaultdb_core::record::FieldValue;
+use crate::error::{Result, VaultdbError};
+use crate::record::FieldValue;
 
 /// Top-level schema file structure.
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,7 +180,7 @@ fn type_matches(actual: &str, expected: &str) -> bool {
 }
 
 /// Infer a schema from a set of records.
-pub fn infer_schema(folder_name: &str, records: &[vaultdb_core::record::Record]) -> CollectionSchema {
+pub fn infer_schema(folder_name: &str, records: &[crate::record::Record]) -> CollectionSchema {
     let mut field_types: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     let mut field_values: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut field_count: BTreeMap<String, usize> = BTreeMap::new();
@@ -279,7 +279,7 @@ pub fn infer_schema(folder_name: &str, records: &[vaultdb_core::record::Record])
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vaultdb_core::record::{FieldValue, Record};
+    use crate::record::{FieldValue, Record};
     use std::path::PathBuf;
 
     fn make_record(fields: Vec<(&str, FieldValue)>) -> Record {

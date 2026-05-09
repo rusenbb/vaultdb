@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use crate::cli::LinkDirection;
-use crate::filter::{WhereClause, matches_all_with_links};
+use vaultdb_core::filter::{WhereClause, matches_all_with_links};
 use vaultdb_core::links::{LinkIndex, TraverseDirection};
 use vaultdb_core::record::Record;
 use crate::vault::Vault;

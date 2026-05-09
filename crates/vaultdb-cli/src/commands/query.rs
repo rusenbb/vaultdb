@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use crate::cli::OutputFormat;
-use crate::filter::{WhereClause, WhereExpr, matches_all_with_links, matches_exprs_with_links};
+use vaultdb_core::filter::{WhereClause, WhereExpr, matches_all_with_links, matches_exprs_with_links};
 use vaultdb_core::links::LinkIndex;
 use crate::output;
 use vaultdb_core::record::{FieldValue, Record};

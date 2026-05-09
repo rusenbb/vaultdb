@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 
-use crate::filter::{WhereClause, matches_all};
-use crate::schema::{self, VaultSchema};
+use vaultdb_core::filter::{WhereClause, matches_all};
+use vaultdb_core::schema::{self, VaultSchema};
 use crate::vault::Vault;
 
 const SCHEMA_FILENAME: &str = "vaultdb-schema.yaml";

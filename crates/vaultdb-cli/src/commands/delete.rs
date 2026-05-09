@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use vaultdb_core::error::VaultdbError;
-use crate::filter::{WhereClause, matches_all};
+use vaultdb_core::filter::{WhereClause, matches_all};
 use vaultdb_core::links::LinkIndex;
 use crate::vault::Vault;
 
