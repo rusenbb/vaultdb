@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 
-use vaultdb_core::filter::{WhereClause, matches_all};
+use vaultdb_core::Expr;
 use vaultdb_core::schema::{self, VaultSchema};
 use vaultdb_core::vault::Vault;
 
@@ -81,17 +81,28 @@ pub fn run_validate(vault: &Vault, folder: &str, recursive: bool, verbose: bool)
     for (name, collection) in matching {
         println!("Validating collection: {}", name.bold());
 
-        // Apply collection filter
-        let filter_clauses: Vec<WhereClause> = collection
+        // Apply collection filter — multiple filter strings are AND-ed
+        let filter_exprs: Vec<Expr> = collection
             .filter
             .iter()
-            .map(|s| WhereClause::parse(s))
+            .map(|s| Expr::parse(s))
             .collect::<vaultdb_core::error::Result<Vec<_>>>()
             .context("parsing collection filter")?;
+        let combined_filter: Option<Expr> = match filter_exprs.len() {
+            0 => None,
+            1 => Some(filter_exprs.into_iter().next().unwrap()),
+            _ => Some(Expr::And(filter_exprs)),
+        };
 
         let filtered: Vec<_> = records
             .iter()
-            .filter(|r| filter_clauses.is_empty() || matches_all(&filter_clauses, r, &vault.root))
+            .filter(|r| {
+                combined_filter
+                    .as_ref()
+                    .map_or(true, |expr| {
+                        vaultdb_core::filter::evaluate_expr(expr, r, &vault.root, None)
+                    })
+            })
             .collect();
 
         let mut violations_count = 0;
