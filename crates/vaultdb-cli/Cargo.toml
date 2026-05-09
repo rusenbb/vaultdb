@@ -14,6 +14,7 @@ name = "vaultdb"
 path = "src/main.rs"
 
 [dependencies]
+vaultdb-core = { path = "../vaultdb-core" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

@@ -2,7 +2,7 @@ use anyhow::Result;
 use colored::Colorize;
 
 use crate::cli::LinkDirection;
-use crate::links::LinkIndex;
+use vaultdb_core::links::LinkIndex;
 use crate::vault::Vault;
 
 /// Run the `links` command — show outgoing/incoming links for a note.

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 
-use crate::frontmatter;
+use vaultdb_core::frontmatter;
 use crate::vault::Vault;
 use crate::writer;
 

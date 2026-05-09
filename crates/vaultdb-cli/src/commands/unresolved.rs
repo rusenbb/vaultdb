@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::links::{LinkIndex, TraverseDirection};
+use vaultdb_core::links::{LinkIndex, TraverseDirection};
 use crate::vault::Vault;
 
 /// Run the `unresolved` command — find all wiki-links pointing to non-existent files.

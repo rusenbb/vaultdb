@@ -4,8 +4,8 @@ use std::path::Path;
 use comfy_table::{ContentArrangement, Table};
 
 use crate::cli::OutputFormat;
-use crate::links::LinkIndex;
-use crate::record::{FieldValue, Record};
+use vaultdb_core::links::LinkIndex;
+use vaultdb_core::record::{FieldValue, Record};
 
 /// Format records for display.
 pub fn format_records(

@@ -5,8 +5,8 @@ use colored::Colorize;
 
 use crate::cli::LinkDirection;
 use crate::filter::{WhereClause, matches_all_with_links};
-use crate::links::{LinkIndex, TraverseDirection};
-use crate::record::Record;
+use vaultdb_core::links::{LinkIndex, TraverseDirection};
+use vaultdb_core::record::Record;
 use crate::vault::Vault;
 
 /// Run the `traverse` command — BFS from a starting note.

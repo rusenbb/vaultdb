@@ -1,7 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::links::LinkIndex;
+use vaultdb_core::links::LinkIndex;
 use crate::vault::Vault;
 
 /// Run the `rename` command — rename a note and update all wiki-links across the vault.

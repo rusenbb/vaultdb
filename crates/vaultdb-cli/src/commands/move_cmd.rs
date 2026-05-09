@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 
-use crate::error::VaultdbError;
+use vaultdb_core::error::VaultdbError;
 use crate::filter::{WhereClause, matches_all};
 use crate::vault::Vault;
 

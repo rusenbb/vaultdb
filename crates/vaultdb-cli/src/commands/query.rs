@@ -5,9 +5,9 @@ use colored::Colorize;
 
 use crate::cli::OutputFormat;
 use crate::filter::{WhereClause, WhereExpr, matches_all_with_links, matches_exprs_with_links};
-use crate::links::LinkIndex;
+use vaultdb_core::links::LinkIndex;
 use crate::output;
-use crate::record::{FieldValue, Record};
+use vaultdb_core::record::{FieldValue, Record};
 use crate::vault::Vault;
 
 const GRAPH_FIELDS: &[&str] = &["_links", "_link_count", "_backlinks", "_backlink_count"];
@@ -89,14 +89,14 @@ pub fn run_query(
         .links_to_where
         .iter()
         .map(|s| Ok(vec![WhereExpr::parse(s)?]))
-        .collect::<crate::error::Result<Vec<_>>>()
+        .collect::<vaultdb_core::error::Result<Vec<_>>>()
         .context("parsing --links-to-where")?;
 
     let linked_from_where_exprs: Vec<Vec<WhereExpr>> = relational
         .linked_from_where
         .iter()
         .map(|s| Ok(vec![WhereExpr::parse(s)?]))
-        .collect::<crate::error::Result<Vec<_>>>()
+        .collect::<vaultdb_core::error::Result<Vec<_>>>()
         .context("parsing --linked-from-where")?;
 
     // Build name->index lookup for relational joins

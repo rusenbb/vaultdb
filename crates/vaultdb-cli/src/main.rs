@@ -2,12 +2,8 @@
 
 mod cli;
 mod commands;
-mod error;
 mod filter;
-mod frontmatter;
-mod links;
 mod output;
-mod record;
 mod schema;
 mod vault;
 mod writer;

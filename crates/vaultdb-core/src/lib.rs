@@ -1,3 +1,6 @@
 //! vaultdb-core — library engine for vaultdb.
-//!
-//! Engine modules will be moved here in the next task.
+
+pub mod error;
+pub mod frontmatter;
+pub mod links;
+pub mod record;

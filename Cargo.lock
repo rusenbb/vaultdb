@@ -752,6 +752,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "thiserror",
+ "vaultdb-core",
  "walkdir",
 ]
 

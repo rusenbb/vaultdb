@@ -83,7 +83,7 @@ pub fn run_validate(vault: &Vault, folder: &str, recursive: bool, verbose: bool)
             .filter
             .iter()
             .map(|s| WhereClause::parse(s))
-            .collect::<crate::error::Result<Vec<_>>>()
+            .collect::<vaultdb_core::error::Result<Vec<_>>>()
             .context("parsing collection filter")?;
 
         let filtered: Vec<_> = records

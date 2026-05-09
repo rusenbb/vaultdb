@@ -2,8 +2,8 @@ use std::path::Path;
 
 use regex::Regex;
 
-use crate::error::{Result, VaultdbError};
-use crate::record::{FieldValue, Record};
+use vaultdb_core::error::{Result, VaultdbError};
+use vaultdb_core::record::{FieldValue, Record};
 
 #[derive(Debug, Clone)]
 pub enum CompareOp {
@@ -84,7 +84,7 @@ impl WhereClause {
         &self,
         record: &Record,
         vault_root: &Path,
-        link_index: Option<&crate::links::LinkIndex>,
+        link_index: Option<&vaultdb_core::links::LinkIndex>,
     ) -> bool {
         self.alternatives
             .iter()
@@ -183,7 +183,7 @@ impl WhereExpr {
         &self,
         record: &Record,
         vault_root: &Path,
-        link_index: Option<&crate::links::LinkIndex>,
+        link_index: Option<&vaultdb_core::links::LinkIndex>,
     ) -> bool {
         let result = self.eval(record, vault_root, link_index);
         if self.negated { !result } else { result }
@@ -193,7 +193,7 @@ impl WhereExpr {
         &self,
         record: &Record,
         vault_root: &Path,
-        link_index: Option<&crate::links::LinkIndex>,
+        link_index: Option<&vaultdb_core::links::LinkIndex>,
     ) -> bool {
         let field_val = record.get_with_links(&self.field, vault_root, link_index);
 
@@ -283,7 +283,7 @@ pub fn matches_all_with_links(
     clauses: &[WhereClause],
     record: &Record,
     vault_root: &Path,
-    link_index: Option<&crate::links::LinkIndex>,
+    link_index: Option<&vaultdb_core::links::LinkIndex>,
 ) -> bool {
     clauses
         .iter()
@@ -295,7 +295,7 @@ pub fn matches_exprs_with_links(
     exprs: &[WhereExpr],
     record: &Record,
     vault_root: &Path,
-    link_index: Option<&crate::links::LinkIndex>,
+    link_index: Option<&vaultdb_core::links::LinkIndex>,
 ) -> bool {
     exprs
         .iter()
@@ -305,7 +305,7 @@ pub fn matches_exprs_with_links(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::FieldValue;
+    use vaultdb_core::record::FieldValue;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 

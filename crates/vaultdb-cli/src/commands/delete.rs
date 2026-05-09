@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 
-use crate::error::VaultdbError;
+use vaultdb_core::error::VaultdbError;
 use crate::filter::{WhereClause, matches_all};
-use crate::links::LinkIndex;
+use vaultdb_core::links::LinkIndex;
 use crate::vault::Vault;
 
 /// Run the `delete` command.
