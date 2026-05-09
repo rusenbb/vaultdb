@@ -30,7 +30,7 @@ pub fn run_move(
         .map(|s| WhereClause::parse(s).context(format!("parsing where expression: {}", s)))
         .collect::<Result<Vec<_>>>()?;
 
-    let records = vault.load_records(&folder_path, recursive, verbose)?;
+    let records = vault.load_records(&folder_path, recursive, verbose)?.records;
     let matching: Vec<_> = records
         .into_iter()
         .filter(|r| matches_all(&where_clauses, r, &vault.root))

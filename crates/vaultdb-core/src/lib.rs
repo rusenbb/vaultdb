@@ -11,3 +11,4 @@ pub mod writer;
 
 pub use record::{Record, Value};
 pub use error::ParseError;
+pub use vault::{LoadResult, Vault};

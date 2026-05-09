@@ -72,9 +72,9 @@ pub fn run_query(
 
     // Load records — with content if we need graph fields
     let records = if use_graph {
-        vault.load_records_with_content(&folder_path, recursive, verbose)?
+        vault.load_records_with_content(&folder_path, recursive, verbose)?.records
     } else {
-        vault.load_records(&folder_path, recursive, verbose)?
+        vault.load_records(&folder_path, recursive, verbose)?.records
     };
 
     // Build link index if needed
@@ -229,9 +229,9 @@ pub fn run_count(
     let use_graph = needs_graph(where_strs, &None, None, &no_relational);
 
     let records = if use_graph {
-        vault.load_records_with_content(&folder_path, recursive, verbose)?
+        vault.load_records_with_content(&folder_path, recursive, verbose)?.records
     } else {
-        vault.load_records(&folder_path, recursive, verbose)?
+        vault.load_records(&folder_path, recursive, verbose)?.records
     };
 
     let link_index = if use_graph {
@@ -252,7 +252,7 @@ pub fn run_count(
 /// Run the `fields` command — list all unique frontmatter keys with types and frequencies.
 pub fn run_fields(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
-    let records = vault.load_records(&folder_path, recursive, verbose)?;
+    let records = vault.load_records(&folder_path, recursive, verbose)?.records;
     let total = records.len();
 
     // Collect field info: (types seen, count of non-null)
@@ -303,7 +303,7 @@ pub fn run_fields(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -
 /// Run the `tags` command — list all tags with counts.
 pub fn run_tags(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
-    let records = vault.load_records(&folder_path, recursive, verbose)?;
+    let records = vault.load_records(&folder_path, recursive, verbose)?.records;
 
     let mut tag_counts: BTreeMap<String, usize> = BTreeMap::new();
 

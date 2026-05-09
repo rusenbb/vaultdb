@@ -6,6 +6,18 @@ use crate::error::{Result, VaultdbError};
 use crate::frontmatter;
 use crate::record::Record;
 
+/// Records loaded from a folder, with per-file parse diagnostics.
+///
+/// Files with malformed YAML frontmatter appear in `parse_errors` rather than
+/// being silently dropped. Files without frontmatter at all are loaded as
+/// empty records (this is intentional — they remain queryable by virtual
+/// fields like `_name` / `_path`).
+#[derive(Debug, Clone)]
+pub struct LoadResult {
+    pub records: Vec<Record>,
+    pub parse_errors: Vec<crate::error::ParseError>,
+}
+
 /// Represents a discovered Obsidian vault.
 pub struct Vault {
     pub root: PathBuf,
@@ -74,22 +86,30 @@ impl Vault {
         Ok(files)
     }
 
-    /// Load all records from a folder.
-    /// Files without frontmatter are loaded as records with empty fields.
+    /// Load records from a folder, collecting per-file parse diagnostics.
+    ///
+    /// Files with no frontmatter are loaded as empty records (queryable via
+    /// virtual fields). Files with invalid frontmatter are collected into
+    /// `LoadResult.parse_errors` rather than dropped.
+    ///
+    /// `verbose` is preserved for compatibility with the CLI's `-v` flag — it
+    /// causes parse errors to also be logged to stderr as they're encountered.
+    /// Library consumers that don't want stderr logging should pass `false` and
+    /// inspect `parse_errors` themselves.
     pub fn load_records(
         &self,
         folder: &Path,
         recursive: bool,
         verbose: bool,
-    ) -> Result<Vec<Record>> {
+    ) -> Result<LoadResult> {
         let files = self.list_files(folder, recursive)?;
         let mut records = Vec::new();
+        let mut parse_errors = Vec::new();
 
         for path in files {
             match frontmatter::load_record(&path) {
                 Ok(record) => records.push(record),
                 Err(VaultdbError::NoFrontmatter(_)) => {
-                    // Load as empty record — still queryable by virtual fields
                     records.push(Record {
                         path: path.clone(),
                         fields: std::collections::BTreeMap::new(),
@@ -100,24 +120,33 @@ impl Vault {
                     if verbose {
                         eprintln!("skipping (invalid frontmatter): {}: {}", file, reason);
                     }
+                    parse_errors.push(crate::error::ParseError {
+                        file: std::path::PathBuf::from(&file),
+                        message: reason,
+                    });
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        Ok(records)
+        Ok(LoadResult { records, parse_errors })
     }
 
-    /// Load records with raw content preserved (for write operations and link extraction).
-    /// Files without frontmatter are included with empty fields.
+    /// Load records with raw content preserved (for write operations and link extraction),
+    /// collecting per-file parse diagnostics.
+    ///
+    /// Files with no frontmatter are loaded as empty records with their raw content set.
+    /// Files with invalid frontmatter are collected into `LoadResult.parse_errors` rather
+    /// than dropped.
     pub fn load_records_with_content(
         &self,
         folder: &Path,
         recursive: bool,
         verbose: bool,
-    ) -> Result<Vec<Record>> {
+    ) -> Result<LoadResult> {
         let files = self.list_files(folder, recursive)?;
         let mut records = Vec::new();
+        let mut parse_errors = Vec::new();
 
         for path in files {
             match frontmatter::load_record_with_content(&path) {
@@ -134,12 +163,16 @@ impl Vault {
                     if verbose {
                         eprintln!("skipping (invalid frontmatter): {}: {}", file, reason);
                     }
+                    parse_errors.push(crate::error::ParseError {
+                        file: std::path::PathBuf::from(&file),
+                        message: reason,
+                    });
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        Ok(records)
+        Ok(LoadResult { records, parse_errors })
     }
 }
 
@@ -223,7 +256,8 @@ mod tests {
         let vault = Vault::with_root(dir.path().to_path_buf());
         let records = vault
             .load_records(&dir.path().join("notes"), false, false)
-            .unwrap();
+            .unwrap()
+            .records;
         // Should load all 3 .md files, including no_fm.md with empty fields
         assert_eq!(records.len(), 3);
 
@@ -232,6 +266,31 @@ mod tests {
             .find(|r| r.virtual_name() == "no_fm")
             .unwrap();
         assert!(no_fm.fields.is_empty());
+    }
+
+    #[test]
+    fn load_records_surfaces_invalid_frontmatter_as_parse_errors() {
+        use std::fs;
+
+        let dir = create_test_vault();
+        // Add a file with malformed YAML frontmatter
+        fs::write(
+            dir.path().join("notes/broken.md"),
+            "---\n: : : not yaml\n---\nbody\n",
+        )
+        .unwrap();
+
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let result = vault
+            .load_records(&dir.path().join("notes"), false, false)
+            .unwrap();
+
+        // The 3 valid-or-empty files (test1, test2, no_fm) load as records;
+        // broken.md is collected as a parse error.
+        assert_eq!(result.records.len(), 3);
+        assert_eq!(result.parse_errors.len(), 1);
+        assert!(result.parse_errors[0].file.ends_with("broken.md"));
+        assert!(!result.parse_errors[0].message.is_empty());
     }
 
     #[test]

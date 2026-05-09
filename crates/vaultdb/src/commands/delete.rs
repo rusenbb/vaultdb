@@ -34,8 +34,8 @@ pub fn run_delete(
         .collect::<Result<Vec<_>>>()?;
 
     // Load with content so we can build the link index for dangling link warnings
-    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?;
-    let all_records = vault.load_records_with_content(&vault.root, true, verbose)?;
+    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?.records;
+    let all_records = vault.load_records_with_content(&vault.root, true, verbose)?.records;
     let index = LinkIndex::build_with_root(&all_records, Some(&vault.root));
 
     let matching: Vec<_> = records

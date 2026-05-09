@@ -29,7 +29,7 @@ pub fn run_rename(
     }
 
     // Load all records to find references and build link index
-    let records = vault.load_records_with_content(&vault.root, true, verbose)?;
+    let records = vault.load_records_with_content(&vault.root, true, verbose)?.records;
     let index = LinkIndex::build_with_root(&records, Some(&vault.root));
 
     // Check for duplicate filenames

@@ -15,7 +15,7 @@ pub fn run_links(
     verbose: bool,
 ) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
-    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?;
+    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?.records;
     let index = LinkIndex::build_with_root(&records, Some(&vault.root));
 
     println!("{}", name.bold());

@@ -22,7 +22,7 @@ pub fn run_traverse(
     verbose: bool,
 ) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
-    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?;
+    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?.records;
     let index = LinkIndex::build_with_root(&records, Some(&vault.root));
 
     let where_clauses: Vec<WhereClause> = where_strs

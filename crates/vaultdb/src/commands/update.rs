@@ -82,7 +82,7 @@ pub fn run_update(
         .map(|s| WhereClause::parse(s).context(format!("parsing where expression: {}", s)))
         .collect::<Result<Vec<_>>>()?;
 
-    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?;
+    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?.records;
 
     let matching: Vec<_> = records
         .into_iter()
