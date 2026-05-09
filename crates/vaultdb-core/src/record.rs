@@ -16,13 +16,20 @@ pub enum Value {
 }
 
 /// One parsed .md file = one record.
-#[derive(Debug, Clone)]
+///
+/// Serialization note: `path` serializes as a string. For machine-portable
+/// JSON, store records relative to the vault root before round-tripping;
+/// absolute paths are host-specific. `raw_content` is skipped when `None`
+/// so the wire format stays compact for record listings that don't include
+/// body text.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Record {
     /// Absolute path to the .md file.
     pub path: PathBuf,
     /// Parsed frontmatter fields.
     pub fields: BTreeMap<String, Value>,
     /// Raw file content — only loaded for write operations.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub raw_content: Option<String>,
 }
 
@@ -389,6 +396,37 @@ mod tests {
             .display_value(),
             "a, b"
         );
+    }
+
+    #[test]
+    fn record_serializes_with_path_as_string_and_skips_raw_content() {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("status".into(), Value::String("active".into()));
+        let r = Record {
+            path: std::path::PathBuf::from("/v/notes/a.md"),
+            fields,
+            raw_content: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("/v/notes/a.md"));
+        assert!(json.contains("status"));
+        assert!(!json.contains("raw_content"));
+    }
+
+    #[test]
+    fn record_round_trips_through_serde() {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("k".into(), Value::Integer(1));
+        let r = Record {
+            path: std::path::PathBuf::from("/v/x.md"),
+            fields,
+            raw_content: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: Record = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.path, r.path);
+        assert_eq!(back.fields.get("k"), Some(&Value::Integer(1)));
+        assert!(back.raw_content.is_none());
     }
 
     #[test]

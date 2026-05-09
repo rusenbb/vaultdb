@@ -12,7 +12,7 @@ pub mod vault;
 pub mod writer;
 
 pub use record::{Record, Value};
-pub use error::ParseError;
+pub use error::{ParseError, Result, VaultdbError};
 pub use vault::{LoadResult, Vault};
 pub use query::{Expr, Predicate, LinkPredicate, CompareOp, Query, SortKey};
 pub use links::{Direction, GraphScope, LinkGraph, UnresolvedLink};

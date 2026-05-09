@@ -12,7 +12,7 @@ use crate::record::Record;
 /// being silently dropped. Files without frontmatter at all are loaded as
 /// empty records (this is intentional — they remain queryable by virtual
 /// fields like `_name` / `_path`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoadResult {
     pub records: Vec<Record>,
     pub parse_errors: Vec<crate::error::ParseError>,
