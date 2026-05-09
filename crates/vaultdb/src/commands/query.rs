@@ -4,11 +4,11 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use crate::cli::OutputFormat;
-use vaultdb_core::filter::{WhereClause, WhereExpr, matches_all_with_links, matches_exprs_with_links};
-use vaultdb_core::links::LinkIndex;
 use crate::output;
-use vaultdb_core::record::{Value, Record};
+use vaultdb_core::links::LinkIndex;
+use vaultdb_core::record::{Record, Value};
 use vaultdb_core::vault::Vault;
+use vaultdb_core::{Expr, LinkPredicate};
 
 const GRAPH_FIELDS: &[&str] = &["_links", "_link_count", "_backlinks", "_backlink_count"];
 
@@ -29,24 +29,57 @@ impl RelationalFilters {
     }
 }
 
-/// Check if any string references a graph virtual field.
+/// Combine multiple `--where` strings (AND-ed) and the relational filters into
+/// a single optional `Expr`. Returns `None` when there are no constraints.
+fn build_filter(where_strs: &[String], relational: &RelationalFilters) -> Result<Option<Expr>> {
+    let mut clauses: Vec<Expr> = Vec::new();
+
+    for s in where_strs {
+        clauses.push(Expr::parse(s).context(format!("parsing where expression: {}", s))?);
+    }
+    for target in &relational.links_to {
+        clauses.push(Expr::LinksTo(LinkPredicate::Target(target.clone())));
+    }
+    for target in &relational.linked_from {
+        clauses.push(Expr::LinkedFrom(LinkPredicate::Target(target.clone())));
+    }
+    for s in &relational.links_to_where {
+        let inner = Expr::parse(s).context(format!("parsing --links-to-where: {}", s))?;
+        clauses.push(Expr::LinksTo(LinkPredicate::Where(Box::new(inner))));
+    }
+    for s in &relational.linked_from_where {
+        let inner = Expr::parse(s).context(format!("parsing --linked-from-where: {}", s))?;
+        clauses.push(Expr::LinkedFrom(LinkPredicate::Where(Box::new(inner))));
+    }
+
+    Ok(match clauses.len() {
+        0 => None,
+        1 => Some(clauses.into_iter().next().unwrap()),
+        _ => Some(Expr::And(clauses)),
+    })
+}
+
+/// True if any flag string references a graph virtual field, OR if the parsed
+/// `Expr` (when present) walks the link graph.
 fn needs_graph(
     where_strs: &[String],
     select: &Option<String>,
     sort: Option<&str>,
     relational: &RelationalFilters,
+    filter: Option<&Expr>,
 ) -> bool {
     if !relational.is_empty() {
         return true;
     }
-
+    if filter.is_some_and(vaultdb_core::filter::expr_uses_links) {
+        return true;
+    }
     let all_strs: Vec<&str> = where_strs
         .iter()
         .map(|s| s.as_str())
         .chain(select.as_deref())
         .chain(sort)
         .collect();
-
     GRAPH_FIELDS
         .iter()
         .any(|gf| all_strs.iter().any(|s| s.contains(gf)))
@@ -67,14 +100,18 @@ pub fn run_query(
     verbose: bool,
 ) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
-    let where_exprs = parse_where_clauses(where_strs)?;
-    let use_graph = needs_graph(where_strs, select, sort_field, relational);
+    let filter = build_filter(where_strs, relational)?;
+    let use_graph = needs_graph(where_strs, select, sort_field, relational, filter.as_ref());
 
     // Load records — with content if we need graph fields
     let records = if use_graph {
-        vault.load_records_with_content(&folder_path, recursive, verbose)?.records
+        vault
+            .load_records_with_content(&folder_path, recursive, verbose)?
+            .records
     } else {
-        vault.load_records(&folder_path, recursive, verbose)?.records
+        vault
+            .load_records(&folder_path, recursive, verbose)?
+            .records
     };
 
     // Build link index if needed
@@ -84,96 +121,19 @@ pub fn run_query(
         None
     };
 
-    // Parse relational where expressions
-    let links_to_where_exprs: Vec<Vec<WhereExpr>> = relational
-        .links_to_where
-        .iter()
-        .map(|s| Ok(vec![WhereExpr::parse(s)?]))
-        .collect::<vaultdb_core::error::Result<Vec<_>>>()
-        .context("parsing --links-to-where")?;
-
-    let linked_from_where_exprs: Vec<Vec<WhereExpr>> = relational
-        .linked_from_where
-        .iter()
-        .map(|s| Ok(vec![WhereExpr::parse(s)?]))
-        .collect::<vaultdb_core::error::Result<Vec<_>>>()
-        .context("parsing --linked-from-where")?;
-
-    // Build name->index lookup for relational joins
-    let record_by_name: std::collections::BTreeMap<String, usize> = if use_graph {
+    // Filter
+    let mut filtered: Vec<Record> = if let Some(expr) = filter.as_ref() {
         records
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (r.virtual_name(), i))
+            .into_iter()
+            .filter(|r| {
+                vaultdb_core::filter::evaluate_expr(expr, r, &vault.root, link_index.as_ref())
+            })
             .collect()
     } else {
-        std::collections::BTreeMap::new()
+        records
     };
 
-    // Filter records — collect indices of matching records first to avoid borrow conflicts
-    let matching_indices: Vec<usize> = (0..records.len())
-        .filter(|&i| {
-            let r = &records[i];
-
-            // Standard where filters
-            if !matches_all_with_links(&where_exprs, r, &vault.root, link_index.as_ref()) {
-                return false;
-            }
-
-            // Relational filters (all must pass)
-            if let Some(idx) = &link_index {
-                let name = r.virtual_name();
-
-                // --links-to: this note must link to the specified note
-                for target in &relational.links_to {
-                    if !idx.has_link_to(&name, target) {
-                        return false;
-                    }
-                }
-
-                // --linked-from: this note must be linked from the specified note
-                for source in &relational.linked_from {
-                    if !idx.has_link_from(&name, source) {
-                        return false;
-                    }
-                }
-
-                // --links-to-where: this note must link to at least one note matching the condition
-                for exprs in &links_to_where_exprs {
-                    let outgoing = idx.outgoing_links(&name);
-                    let any_match = outgoing.iter().any(|target| {
-                        record_by_name.get(*target).is_some_and(|&ti| {
-                            matches_exprs_with_links(exprs, &records[ti], &vault.root, Some(idx))
-                        })
-                    });
-                    if !any_match {
-                        return false;
-                    }
-                }
-
-                // --linked-from-where: this note must be linked from at least one note matching the condition
-                for exprs in &linked_from_where_exprs {
-                    let incoming = idx.incoming_links(&name);
-                    let any_match = incoming.iter().any(|source| {
-                        record_by_name.get(*source).is_some_and(|&si| {
-                            matches_exprs_with_links(exprs, &records[si], &vault.root, Some(idx))
-                        })
-                    });
-                    if !any_match {
-                        return false;
-                    }
-                }
-            }
-
-            true
-        })
-        .collect();
-
-    let mut filtered: Vec<Record> = matching_indices
-        .into_iter()
-        .map(|i| records[i].clone())
-        .collect();
-
+    // Sort
     if let Some(sort_key) = sort_field {
         filtered.sort_by(|a, b| {
             let va = a.get_with_links(sort_key, &vault.root, link_index.as_ref());
@@ -185,10 +145,12 @@ pub fn run_query(
         }
     }
 
+    // Limit
     if let Some(n) = limit {
         filtered.truncate(n);
     }
 
+    // Output
     let select_fields: Vec<String> = select
         .as_ref()
         .map(|s| s.split(',').map(|f| f.trim().to_string()).collect())
@@ -219,19 +181,23 @@ pub fn run_count(
     verbose: bool,
 ) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
-    let where_exprs = parse_where_clauses(where_strs)?;
     let no_relational = RelationalFilters {
         links_to: vec![],
         linked_from: vec![],
         links_to_where: vec![],
         linked_from_where: vec![],
     };
-    let use_graph = needs_graph(where_strs, &None, None, &no_relational);
+    let filter = build_filter(where_strs, &no_relational)?;
+    let use_graph = needs_graph(where_strs, &None, None, &no_relational, filter.as_ref());
 
     let records = if use_graph {
-        vault.load_records_with_content(&folder_path, recursive, verbose)?.records
+        vault
+            .load_records_with_content(&folder_path, recursive, verbose)?
+            .records
     } else {
-        vault.load_records(&folder_path, recursive, verbose)?.records
+        vault
+            .load_records(&folder_path, recursive, verbose)?
+            .records
     };
 
     let link_index = if use_graph {
@@ -240,10 +206,16 @@ pub fn run_count(
         None
     };
 
-    let count = records
-        .iter()
-        .filter(|r| matches_all_with_links(&where_exprs, r, &vault.root, link_index.as_ref()))
-        .count();
+    let count = if let Some(expr) = filter.as_ref() {
+        records
+            .iter()
+            .filter(|r| {
+                vaultdb_core::filter::evaluate_expr(expr, r, &vault.root, link_index.as_ref())
+            })
+            .count()
+    } else {
+        records.len()
+    };
 
     println!("{}", count);
     Ok(())
@@ -337,12 +309,6 @@ struct FieldInfo {
     total: usize,
     non_null: usize,
     types: BTreeMap<String, usize>,
-}
-
-fn parse_where_clauses(strs: &[String]) -> Result<Vec<WhereClause>> {
-    strs.iter()
-        .map(|s| WhereClause::parse(s).context(format!("parsing where expression: {}", s)))
-        .collect()
 }
 
 fn compare_field_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {

@@ -803,7 +803,7 @@ pub fn evaluate_expr(
 ) -> bool {
     use crate::query::{Expr, LinkPredicate};
     match expr {
-        Expr::Predicate(p) => evaluate_predicate(p, record, vault_root),
+        Expr::Predicate(p) => evaluate_predicate(p, record, vault_root, link_index),
         Expr::And(es) => es.iter().all(|e| evaluate_expr(e, record, vault_root, link_index)),
         Expr::Or(es) => es.iter().any(|e| evaluate_expr(e, record, vault_root, link_index)),
         Expr::Not(e) => !evaluate_expr(e, record, vault_root, link_index),
@@ -843,19 +843,24 @@ pub fn evaluate_expr(
 }
 
 /// Evaluate a leaf `Predicate` against a single record.
+///
+/// `link_index` is used to resolve graph virtual fields (`_links`,
+/// `_link_count`, `_backlinks`, `_backlink_count`). Pass `None` if the predicate
+/// only references frontmatter and non-graph virtual fields.
 pub fn evaluate_predicate(
     p: &crate::query::Predicate,
     record: &Record,
     vault_root: &Path,
+    link_index: Option<&crate::links::LinkIndex>,
 ) -> bool {
     use crate::query::{CompareOp, Predicate};
     use crate::record::Value;
 
+    let get = |field: &str| record.get_with_links(field, vault_root, link_index);
+
     match p {
-        Predicate::Equals { field, value } => {
-            record.get(field, vault_root).as_ref() == Some(value)
-        }
-        Predicate::Contains { field, value } => match record.get(field, vault_root) {
+        Predicate::Equals { field, value } => get(field).as_ref() == Some(value),
+        Predicate::Contains { field, value } => match get(field) {
             Some(Value::String(s)) => match value {
                 Value::String(v) => s.contains(v.as_str()),
                 _ => false,
@@ -864,7 +869,7 @@ pub fn evaluate_predicate(
             _ => false,
         },
         Predicate::Compare { field, op, value } => {
-            let actual = match record.get(field, vault_root) {
+            let actual = match get(field) {
                 Some(v) => v,
                 None => return false,
             };
@@ -877,26 +882,20 @@ pub fn evaluate_predicate(
                 CompareOp::Ne => ord != std::cmp::Ordering::Equal,
             }
         }
-        Predicate::Matches { field, regex } => match record.get(field, vault_root) {
-            Some(Value::String(s)) => {
-                regex::Regex::new(regex).map_or(false, |re| re.is_match(&s))
-            }
+        Predicate::Matches { field, regex } => match get(field) {
+            Some(Value::String(s)) => regex::Regex::new(regex).map_or(false, |re| re.is_match(&s)),
             _ => false,
         },
-        Predicate::StartsWith { field, value } => match record.get(field, vault_root) {
+        Predicate::StartsWith { field, value } => match get(field) {
             Some(Value::String(s)) => s.starts_with(value.as_str()),
             _ => false,
         },
-        Predicate::EndsWith { field, value } => match record.get(field, vault_root) {
+        Predicate::EndsWith { field, value } => match get(field) {
             Some(Value::String(s)) => s.ends_with(value.as_str()),
             _ => false,
         },
-        Predicate::Exists { field } => {
-            !matches!(record.get(field, vault_root), None | Some(Value::Null))
-        }
-        Predicate::Missing { field } => {
-            matches!(record.get(field, vault_root), None | Some(Value::Null))
-        }
+        Predicate::Exists { field } => !matches!(get(field), None | Some(Value::Null)),
+        Predicate::Missing { field } => matches!(get(field), None | Some(Value::Null)),
     }
 }
 
