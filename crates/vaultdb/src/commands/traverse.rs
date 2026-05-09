@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use crate::cli::LinkDirection;
-use vaultdb_core::links::TraverseDirection;
 use vaultdb_core::record::Record;
 use vaultdb_core::vault::Vault;
 use vaultdb_core::{Direction, Expr, LinkGraph};
@@ -46,15 +45,13 @@ pub fn run_traverse(
     let record_map: BTreeMap<String, &Record> =
         records.iter().map(|r| (r.virtual_name(), r)).collect();
 
-    // Convert the public-CLI Direction into the existing internal one used by
-    // LinkGraph::traverse (the new `Direction` enum has a From conversion).
-    let traverse_dir: TraverseDirection = match direction {
-        LinkDirection::Outgoing => Direction::Outgoing.into(),
-        LinkDirection::Incoming => Direction::Incoming.into(),
-        LinkDirection::Both => Direction::Both.into(),
+    let dir = match direction {
+        LinkDirection::Outgoing => Direction::Outgoing,
+        LinkDirection::Incoming => Direction::Incoming,
+        LinkDirection::Both => Direction::Both,
     };
 
-    let traversal = graph.traverse(name, depth, traverse_dir);
+    let traversal = graph.traverse(name, depth, dir);
 
     if traversal.is_empty() || (traversal.len() == 1 && !record_map.contains_key(name)) {
         println!("Note '{}' not found in the link graph.", name);

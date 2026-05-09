@@ -69,8 +69,7 @@ impl Vault {
                     // Skip hidden directories — but allow the root entry
                     // itself, even when it lives under a hidden parent (e.g.
                     // a TempDir whose name starts with `.tmp`).
-                    e.depth() == 0
-                        || !e.file_name().to_str().is_some_and(|s| s.starts_with('.'))
+                    e.depth() == 0 || !e.file_name().to_str().is_some_and(|s| s.starts_with('.'))
                 })
             {
                 let entry = entry.map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -137,7 +136,10 @@ impl Vault {
             }
         }
 
-        Ok(LoadResult { records, parse_errors })
+        Ok(LoadResult {
+            records,
+            parse_errors,
+        })
     }
 
     /// Load records with raw content preserved (for write operations and link extraction),
@@ -180,7 +182,10 @@ impl Vault {
             }
         }
 
-        Ok(LoadResult { records, parse_errors })
+        Ok(LoadResult {
+            records,
+            parse_errors,
+        })
     }
 
     /// Look up a single record by its filename (without the `.md` extension)
@@ -192,11 +197,7 @@ impl Vault {
     /// frontmatter is malformed — unlike `load_records`, single-record lookup
     /// surfaces parse errors as a hard error because the caller asked for one
     /// specific record.
-    pub fn find_by_name(
-        &self,
-        folder: &str,
-        name: &str,
-    ) -> Result<Option<Record>> {
+    pub fn find_by_name(&self, folder: &str, name: &str) -> Result<Option<Record>> {
         let folder_path = self.resolve_folder(folder)?;
         let candidate = folder_path.join(format!("{}.md", name));
         if !candidate.is_file() {
@@ -221,15 +222,13 @@ impl Vault {
     /// filters records, and rebuilds the graph from the filtered subset.
     ///
     /// Records are loaded with raw content so wikilinks can be extracted.
-    pub fn link_graph(
-        &self,
-        scope: crate::links::GraphScope,
-    ) -> Result<crate::links::LinkGraph> {
+    pub fn link_graph(&self, scope: crate::links::GraphScope) -> Result<crate::links::LinkGraph> {
         use crate::links::{GraphScope, LinkGraph};
         let records: Vec<Record> = match scope {
-            GraphScope::All => self
-                .load_records_with_content(&self.root, true, false)?
-                .records,
+            GraphScope::All => {
+                self.load_records_with_content(&self.root, true, false)?
+                    .records
+            }
             GraphScope::Folder(folder) => {
                 let path = self.resolve_folder(&folder)?;
                 self.load_records_with_content(&path, true, false)?.records
@@ -240,9 +239,7 @@ impl Vault {
                     .records;
                 let idx = LinkGraph::build_with_root(&all, Some(&self.root));
                 all.into_iter()
-                    .filter(|r| {
-                        crate::filter::evaluate_expr(&expr, r, &self.root, Some(&idx))
-                    })
+                    .filter(|r| crate::filter::evaluate_expr(&expr, r, &self.root, Some(&idx)))
                     .collect()
             }
         };
@@ -258,7 +255,10 @@ impl Vault {
         let folder_path = self.resolve_folder(&q.folder)?;
 
         // Determine if the filter references the link graph.
-        let needs_links = q.filter.as_ref().is_some_and(crate::filter::expr_uses_links);
+        let needs_links = q
+            .filter
+            .as_ref()
+            .is_some_and(crate::filter::expr_uses_links);
 
         // Load records with content if links are needed for extraction
         let load = if needs_links {
@@ -285,12 +285,18 @@ impl Vault {
         // Sort
         if let Some(sort_key) = &q.sort {
             records.sort_by(|a, b| {
-                let av = a.get(&sort_key.field, &self.root)
+                let av = a
+                    .get(&sort_key.field, &self.root)
                     .unwrap_or(crate::record::Value::Null);
-                let bv = b.get(&sort_key.field, &self.root)
+                let bv = b
+                    .get(&sort_key.field, &self.root)
                     .unwrap_or(crate::record::Value::Null);
                 let ord = crate::filter::compare_values(&av, &bv);
-                if sort_key.descending { ord.reverse() } else { ord }
+                if sort_key.descending {
+                    ord.reverse()
+                } else {
+                    ord
+                }
             });
         }
 
@@ -479,11 +485,7 @@ mod tests {
     fn find_by_name_invalid_frontmatter_errors() {
         use std::fs;
         let dir = create_test_vault();
-        fs::write(
-            dir.path().join("notes/broken.md"),
-            "---\n: : :\n---\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("notes/broken.md"), "---\n: : :\n---\n").unwrap();
         let vault = Vault::with_root(dir.path().to_path_buf());
         let result = vault.find_by_name("notes", "broken");
         assert!(matches!(
@@ -538,9 +540,14 @@ mod tests {
         // Exists predicate on _name matches all 3 records; limit cuts to 2.
         let q = Query {
             folder: "notes".into(),
-            filter: Some(Expr::Predicate(Predicate::Exists { field: "_name".into() })),
+            filter: Some(Expr::Predicate(Predicate::Exists {
+                field: "_name".into(),
+            })),
             select: None,
-            sort: Some(SortKey { field: "_name".into(), descending: false }),
+            sort: Some(SortKey {
+                field: "_name".into(),
+                descending: false,
+            }),
             limit: Some(2),
             recursive: false,
         };
@@ -566,7 +573,9 @@ mod tests {
         // must contain only "status" (or be empty if the record had no status).
         let q = Query {
             folder: "notes".into(),
-            filter: Some(Expr::Predicate(Predicate::Exists { field: "_name".into() })),
+            filter: Some(Expr::Predicate(Predicate::Exists {
+                field: "_name".into(),
+            })),
             select: Some(vec!["status".into()]),
             sort: None,
             limit: None,
@@ -659,7 +668,9 @@ mod tests {
         )
         .unwrap();
         let vault = Vault::with_root(dir.path().to_path_buf());
-        let graph = vault.link_graph(GraphScope::Folder("notes".into())).unwrap();
+        let graph = vault
+            .link_graph(GraphScope::Folder("notes".into()))
+            .unwrap();
         assert!(graph.outgoing_links("with_link").contains(&"test1"));
     }
 }

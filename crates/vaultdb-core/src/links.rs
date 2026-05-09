@@ -10,32 +10,14 @@ use std::sync::LazyLock;
 
 use crate::record::{Record, Value};
 
-#[derive(Debug, Clone)]
-pub enum TraverseDirection {
-    Outgoing,
-    Incoming,
-    Both,
-}
-
-/// Public direction enum for the graph traversal API.
-///
-/// Mirrors `TraverseDirection`; the existing internal type stays for now to
-/// avoid touching every `commands/*.rs` call site at once.
+/// The direction of edges to follow when querying or traversing the link
+/// graph: outgoing wikilinks (this note → others), incoming backlinks, or
+/// both at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Direction {
     Outgoing,
     Incoming,
     Both,
-}
-
-impl From<Direction> for TraverseDirection {
-    fn from(d: Direction) -> Self {
-        match d {
-            Direction::Outgoing => TraverseDirection::Outgoing,
-            Direction::Incoming => TraverseDirection::Incoming,
-            Direction::Both => TraverseDirection::Both,
-        }
-    }
 }
 
 /// What subset of the vault to build the link graph over.
@@ -103,11 +85,11 @@ pub fn record_links(record: &Record) -> BTreeSet<String> {
 #[derive(Debug, Default)]
 pub struct LinkGraph {
     /// note name -> outgoing link targets (as written in the wiki-links)
-    pub outgoing: BTreeMap<String, BTreeSet<String>>,
+    outgoing: BTreeMap<String, BTreeSet<String>>,
     /// note name -> names of notes that link to it
-    pub incoming: BTreeMap<String, BTreeSet<String>>,
+    incoming: BTreeMap<String, BTreeSet<String>>,
     /// filename -> list of relative paths (for detecting duplicates)
-    pub name_to_paths: BTreeMap<String, Vec<String>>,
+    name_to_paths: BTreeMap<String, Vec<String>>,
     /// note name -> Record (for link-predicate evaluation)
     records_by_name: BTreeMap<String, Record>,
 }
@@ -130,8 +112,15 @@ impl LinkGraph {
                 Some(root) => record.virtual_path(root),
                 None => record.path.to_string_lossy().into_owned(),
             };
-            index.name_to_paths.entry(name.clone()).or_default().push(rel_path);
-            index.records_by_name.entry(name).or_insert_with(|| record.clone());
+            index
+                .name_to_paths
+                .entry(name.clone())
+                .or_default()
+                .push(rel_path);
+            index
+                .records_by_name
+                .entry(name)
+                .or_insert_with(|| record.clone());
         }
 
         // Second pass: extract links and resolve targets
@@ -213,12 +202,13 @@ impl LinkGraph {
     }
 
     /// BFS traversal from a starting note.
-    /// Returns (name, depth) pairs for all reachable notes within max_depth.
+    /// Returns (name, depth) pairs for all reachable notes within max_depth,
+    /// with the starting node included at depth 0.
     pub fn traverse(
         &self,
         start: &str,
         max_depth: usize,
-        direction: TraverseDirection,
+        direction: Direction,
     ) -> Vec<(String, usize)> {
         use std::collections::VecDeque;
 
@@ -236,9 +226,9 @@ impl LinkGraph {
             }
 
             let neighbors: Vec<&str> = match direction {
-                TraverseDirection::Outgoing => self.outgoing_links(&current),
-                TraverseDirection::Incoming => self.incoming_links(&current),
-                TraverseDirection::Both => {
+                Direction::Outgoing => self.outgoing_links(&current),
+                Direction::Incoming => self.incoming_links(&current),
+                Direction::Both => {
                     let mut all = self.outgoing_links(&current);
                     all.extend(self.incoming_links(&current));
                     all
@@ -293,7 +283,7 @@ impl LinkGraph {
     /// BFS traversal returning just the reachable note names (without depth).
     /// The starting note itself is NOT included.
     pub fn traverse_from(&self, start: &str, depth: usize, direction: Direction) -> Vec<String> {
-        self.traverse(start, depth, direction.into())
+        self.traverse(start, depth, direction)
             .into_iter()
             .filter(|(name, d)| name != start && *d > 0)
             .map(|(name, _)| name)
@@ -325,10 +315,7 @@ impl LinkGraph {
                         .collect(),
                 ),
             ),
-            (
-                "_backlink_count",
-                Value::Integer(in_links.len() as i64),
-            ),
+            ("_backlink_count", Value::Integer(in_links.len() as i64)),
         ]
     }
 }
@@ -467,34 +454,45 @@ mod tests {
 
     #[test]
     fn unresolved_returns_dangling_targets() {
-        let records = vec![Record {
-            path: PathBuf::from("/vault/a.md"),
-            fields: BTreeMap::new(),
-            raw_content: Some("Links to [[ghost]] and [[b]].".into()),
-        }, Record {
-            path: PathBuf::from("/vault/b.md"),
-            fields: BTreeMap::new(),
-            raw_content: Some("".into()),
-        }];
+        let records = vec![
+            Record {
+                path: PathBuf::from("/vault/a.md"),
+                fields: BTreeMap::new(),
+                raw_content: Some("Links to [[ghost]] and [[b]].".into()),
+            },
+            Record {
+                path: PathBuf::from("/vault/b.md"),
+                fields: BTreeMap::new(),
+                raw_content: Some("".into()),
+            },
+        ];
 
         let index = LinkGraph::build(&records);
         let unresolved = index.unresolved();
-        assert_eq!(unresolved.len(), 1, "expected one dangling link, got {:?}", unresolved);
+        assert_eq!(
+            unresolved.len(),
+            1,
+            "expected one dangling link, got {:?}",
+            unresolved
+        );
         assert_eq!(unresolved[0].source, "a");
         assert_eq!(unresolved[0].target, "ghost");
     }
 
     #[test]
     fn unresolved_empty_when_all_resolved() {
-        let records = vec![Record {
-            path: PathBuf::from("/vault/a.md"),
-            fields: BTreeMap::new(),
-            raw_content: Some("Links to [[b]].".into()),
-        }, Record {
-            path: PathBuf::from("/vault/b.md"),
-            fields: BTreeMap::new(),
-            raw_content: Some("".into()),
-        }];
+        let records = vec![
+            Record {
+                path: PathBuf::from("/vault/a.md"),
+                fields: BTreeMap::new(),
+                raw_content: Some("Links to [[b]].".into()),
+            },
+            Record {
+                path: PathBuf::from("/vault/b.md"),
+                fields: BTreeMap::new(),
+                raw_content: Some("".into()),
+            },
+        ];
 
         let index = LinkGraph::build(&records);
         assert!(index.unresolved().is_empty());
@@ -525,10 +523,18 @@ mod tests {
             fields: BTreeMap::new(),
             raw_content: Some(content.into()),
         };
-        let records = vec![mk("a", "[[b]]"), mk("b", "[[c]]"), mk("c", "[[d]]"), mk("d", "")];
+        let records = vec![
+            mk("a", "[[b]]"),
+            mk("b", "[[c]]"),
+            mk("c", "[[d]]"),
+            mk("d", ""),
+        ];
         let index = LinkGraph::build(&records);
         let names = index.traverse_from("a", 1, Direction::Outgoing);
         assert!(names.contains(&"b".to_string()));
-        assert!(!names.contains(&"c".to_string()), "depth=1 should not reach c");
+        assert!(
+            !names.contains(&"c".to_string()),
+            "depth=1 should not reach c"
+        );
     }
 }

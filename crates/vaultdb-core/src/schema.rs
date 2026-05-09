@@ -208,10 +208,7 @@ pub fn infer_schema(folder_name: &str, records: &[crate::record::Record]) -> Col
                 .or_insert(0) += 1;
             *field_count.entry(key.clone()).or_insert(0) += 1;
 
-            if !matches!(
-                value,
-                Value::Null | Value::List(_) | Value::Map(_)
-            ) {
+            if !matches!(value, Value::Null | Value::List(_) | Value::Map(_)) {
                 field_values
                     .entry(key.clone())
                     .or_default()
@@ -291,7 +288,7 @@ pub fn infer_schema(folder_name: &str, records: &[crate::record::Record]) -> Col
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{Value, Record};
+    use crate::record::{Record, Value};
     use std::path::PathBuf;
 
     fn make_record(fields: Vec<(&str, Value)>) -> Record {

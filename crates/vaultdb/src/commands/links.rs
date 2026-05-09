@@ -2,8 +2,8 @@ use anyhow::Result;
 use colored::Colorize;
 
 use crate::cli::LinkDirection;
-use vaultdb_core::vault::Vault;
 use vaultdb_core::LinkGraph;
+use vaultdb_core::vault::Vault;
 
 /// Run the `links` command — show outgoing/incoming links for a note.
 pub fn run_links(
@@ -15,7 +15,9 @@ pub fn run_links(
     verbose: bool,
 ) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
-    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?.records;
+    let records = vault
+        .load_records_with_content(&folder_path, recursive, verbose)?
+        .records;
     let index = LinkGraph::build_with_root(&records, Some(&vault.root));
 
     println!("{}", name.bold());

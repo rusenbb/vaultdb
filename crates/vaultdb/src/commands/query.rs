@@ -225,7 +225,9 @@ pub fn run_count(
 /// Run the `fields` command — list all unique frontmatter keys with types and frequencies.
 pub fn run_fields(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
-    let records = vault.load_records(&folder_path, recursive, verbose)?.records;
+    let records = vault
+        .load_records(&folder_path, recursive, verbose)?
+        .records;
     let total = records.len();
 
     // Collect field info: (types seen, count of non-null)
@@ -276,7 +278,9 @@ pub fn run_fields(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -
 /// Run the `tags` command — list all tags with counts.
 pub fn run_tags(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
-    let records = vault.load_records(&folder_path, recursive, verbose)?.records;
+    let records = vault
+        .load_records(&folder_path, recursive, verbose)?
+        .records;
 
     let mut tag_counts: BTreeMap<String, usize> = BTreeMap::new();
 

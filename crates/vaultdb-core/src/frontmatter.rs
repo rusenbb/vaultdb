@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::{Result, VaultdbError};
-use crate::record::{Value, Record};
+use crate::record::{Record, Value};
 
 /// Extract the raw frontmatter string from markdown content.
 ///
@@ -281,14 +281,8 @@ related-to:
 "#;
         let fields = parse_frontmatter(yaml).unwrap();
 
-        assert_eq!(
-            fields.get("pinyin"),
-            Some(&Value::String("kuài".into()))
-        );
-        assert_eq!(
-            fields.get("anlam"),
-            Some(&Value::String("hızlı".into()))
-        );
+        assert_eq!(fields.get("pinyin"), Some(&Value::String("kuài".into())));
+        assert_eq!(fields.get("anlam"), Some(&Value::String("hızlı".into())));
         assert_eq!(fields.get("hsk"), Some(&Value::Integer(1)));
 
         // kaliplar should be a list of maps
@@ -353,10 +347,7 @@ related-to:
         let (fm, body_start) = extract_frontmatter(content).unwrap();
         let fields = parse_frontmatter(fm).unwrap();
 
-        assert_eq!(
-            fields.get("pinyin"),
-            Some(&Value::String("kuài".into()))
-        );
+        assert_eq!(fields.get("pinyin"), Some(&Value::String("kuài".into())));
         assert!(content[body_start..].contains("Body text."));
     }
 }

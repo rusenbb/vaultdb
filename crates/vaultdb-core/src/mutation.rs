@@ -119,12 +119,8 @@ impl UpdateBuilder {
         let mut writes = Vec::new();
 
         for record in &load.records {
-            if !crate::filter::evaluate_expr(
-                &self.filter,
-                record,
-                &vault.root,
-                link_index.as_ref(),
-            ) {
+            if !crate::filter::evaluate_expr(&self.filter, record, &vault.root, link_index.as_ref())
+            {
                 continue;
             }
 
@@ -145,8 +141,7 @@ impl UpdateBuilder {
             let result: Result<()> = (|| {
                 for (field, value) in &self.set_fields {
                     let value_str = render_value_for_yaml(value);
-                    let (new_content, change) =
-                        writer::set_field(&content, field, &value_str)?;
+                    let (new_content, change) = writer::set_field(&content, field, &value_str)?;
                     description_parts.push(format!("{}", change));
                     wr_changes.push(change);
                     content = new_content;
@@ -324,11 +319,7 @@ pub struct MoveBuilder {
 }
 
 impl MoveBuilder {
-    pub fn new(
-        folder: impl Into<String>,
-        to_folder: impl Into<String>,
-        filter: Expr,
-    ) -> Self {
+    pub fn new(folder: impl Into<String>, to_folder: impl Into<String>, filter: Expr) -> Self {
         Self {
             filter,
             folder: folder.into(),
@@ -424,11 +415,7 @@ pub struct RenameBuilder {
 }
 
 impl RenameBuilder {
-    pub fn new(
-        folder: impl Into<String>,
-        from: impl Into<String>,
-        to: impl Into<String>,
-    ) -> Self {
+    pub fn new(folder: impl Into<String>, from: impl Into<String>, to: impl Into<String>) -> Self {
         Self {
             folder: folder.into(),
             from: from.into(),
@@ -472,10 +459,7 @@ impl RenameBuilder {
             if let Some(record) = graph.record_by_name(source_name) {
                 changes.push(PlannedChange {
                     path: record.path.clone(),
-                    description: format!(
-                        "rewrite [[{}]] -> [[{}]]",
-                        self.from, self.to
-                    ),
+                    description: format!("rewrite [[{}]] -> [[{}]]", self.from, self.to),
                 });
             }
         }
@@ -593,11 +577,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::create_dir(dir.path().join(".obsidian")).unwrap();
         fs::create_dir(dir.path().join("notes")).unwrap();
-        fs::write(
-            dir.path().join("notes/a.md"),
-            "---\nstatus: stale\n---\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("notes/a.md"), "---\nstatus: stale\n---\n").unwrap();
         let vault = Vault::with_root(dir.path().to_path_buf());
         let filter = Expr::Predicate(Predicate::Equals {
             field: "status".into(),
@@ -618,11 +598,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::create_dir(dir.path().join(".obsidian")).unwrap();
         fs::create_dir(dir.path().join("notes")).unwrap();
-        fs::write(
-            dir.path().join("notes/a.md"),
-            "---\nstatus: stale\n---\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("notes/a.md"), "---\nstatus: stale\n---\n").unwrap();
         let vault = Vault::with_root(dir.path().to_path_buf());
         let filter = Expr::Predicate(Predicate::Equals {
             field: "status".into(),
@@ -699,16 +675,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::create_dir(dir.path().join(".obsidian")).unwrap();
         fs::create_dir(dir.path().join("notes")).unwrap();
-        fs::write(
-            dir.path().join("notes/old.md"),
-            "---\nstatus: x\n---\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("notes/new.md"),
-            "---\nstatus: y\n---\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("notes/old.md"), "---\nstatus: x\n---\n").unwrap();
+        fs::write(dir.path().join("notes/new.md"), "---\nstatus: y\n---\n").unwrap();
         let vault = Vault::with_root(dir.path().to_path_buf());
         let report = RenameBuilder::new("notes", "old", "new")
             .execute(&vault)
@@ -744,8 +712,7 @@ mod tests {
             field: "status".into(),
             value: Value::String("active".into()),
         });
-        let builder = UpdateBuilder::new("notes", filter)
-            .set("priority", Value::Integer(1));
+        let builder = UpdateBuilder::new("notes", filter).set("priority", Value::Integer(1));
 
         // plan() does not touch disk
         let plan_report = builder.plan(&vault).unwrap();

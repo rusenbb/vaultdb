@@ -30,14 +30,37 @@ pub enum Expr {
 /// A leaf predicate over a record's frontmatter or virtual fields.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Predicate {
-    Equals { field: String, value: Value },
-    Contains { field: String, value: Value },
-    Compare { field: String, op: CompareOp, value: Value },
-    Matches { field: String, regex: String },
-    StartsWith { field: String, value: String },
-    EndsWith { field: String, value: String },
-    Exists { field: String },
-    Missing { field: String },
+    Equals {
+        field: String,
+        value: Value,
+    },
+    Contains {
+        field: String,
+        value: Value,
+    },
+    Compare {
+        field: String,
+        op: CompareOp,
+        value: Value,
+    },
+    Matches {
+        field: String,
+        regex: String,
+    },
+    StartsWith {
+        field: String,
+        value: String,
+    },
+    EndsWith {
+        field: String,
+        value: String,
+    },
+    Exists {
+        field: String,
+    },
+    Missing {
+        field: String,
+    },
 }
 
 /// A scalar comparison operator (used by `Predicate::Compare`).
@@ -93,10 +116,9 @@ impl FromStr for Expr {
     type Err = VaultdbError;
 
     fn from_str(input: &str) -> std::result::Result<Self, Self::Err> {
-        // Delegate to the existing parser in filter.rs. The internal
-        // WhereExpr / WhereClause types are converted into Expr here.
-        // This is a temporary shim for Task 2; the parser will be moved
-        // into query.rs in a later task once filter.rs is fully refactored.
+        // The where-DSL parser lives in `filter.rs` (alongside the rest of
+        // the evaluator). It produces an internal `WhereClause` AST which
+        // is converted to the public `Expr` shape here at the boundary.
         let internal = crate::filter::parse_where_clause(input)?;
         Ok(internal.to_expr())
     }
@@ -156,9 +178,14 @@ mod tests {
     fn query_struct_construction() {
         let q = Query {
             folder: "notes".into(),
-            filter: Some(Expr::Predicate(Predicate::Exists { field: "title".into() })),
+            filter: Some(Expr::Predicate(Predicate::Exists {
+                field: "title".into(),
+            })),
             select: Some(vec!["_name".into(), "title".into()]),
-            sort: Some(SortKey { field: "_modified".into(), descending: true }),
+            sort: Some(SortKey {
+                field: "_modified".into(),
+                descending: true,
+            }),
             limit: Some(10),
             recursive: false,
         };

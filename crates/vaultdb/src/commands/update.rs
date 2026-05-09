@@ -131,10 +131,7 @@ pub(crate) fn print_report(
     }
 
     for change in &report.changes {
-        let rel_path = change
-            .path
-            .strip_prefix(vault_root)
-            .unwrap_or(&change.path);
+        let rel_path = change.path.strip_prefix(vault_root).unwrap_or(&change.path);
         println!("{}", rel_path.display().to_string().bold());
         for line in change.description.split("; ") {
             if !line.is_empty() {
@@ -145,12 +142,7 @@ pub(crate) fn print_report(
 
     for err in &report.errors {
         let rel_path = err.path.strip_prefix(vault_root).unwrap_or(&err.path);
-        eprintln!(
-            "{} {}: {}",
-            "error:".red(),
-            rel_path.display(),
-            err.message
-        );
+        eprintln!("{} {}: {}", "error:".red(), rel_path.display(), err.message);
     }
 
     if dry_run {

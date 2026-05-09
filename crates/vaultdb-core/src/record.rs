@@ -393,11 +393,8 @@ mod tests {
         assert_eq!(Value::Null.display_value(), "");
         assert_eq!(Value::Integer(2019).display_value(), "2019");
         assert_eq!(
-            Value::List(vec![
-                Value::String("a".into()),
-                Value::String("b".into()),
-            ])
-            .display_value(),
+            Value::List(vec![Value::String("a".into()), Value::String("b".into()),])
+                .display_value(),
             "a, b"
         );
     }

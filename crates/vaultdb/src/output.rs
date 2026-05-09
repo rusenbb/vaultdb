@@ -5,7 +5,7 @@ use comfy_table::{ContentArrangement, Table};
 
 use crate::cli::OutputFormat;
 use vaultdb_core::links::LinkGraph;
-use vaultdb_core::record::{Value, Record};
+use vaultdb_core::record::{Record, Value};
 
 /// Format records with optional link index for graph virtual fields.
 pub fn format_records_with_links(

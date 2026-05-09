@@ -75,7 +75,9 @@ pub fn run_validate(vault: &Vault, folder: &str, recursive: bool, verbose: bool)
     }
 
     let folder_path = vault.resolve_folder(folder)?;
-    let records = vault.load_records(&folder_path, recursive, verbose)?.records;
+    let records = vault
+        .load_records(&folder_path, recursive, verbose)?
+        .records;
     let mut total_violations = 0;
 
     for (name, collection) in matching {
@@ -142,7 +144,9 @@ pub fn run_validate(vault: &Vault, folder: &str, recursive: bool, verbose: bool)
 /// Run `schema init` — infer schema from existing data.
 pub fn run_init(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
-    let records = vault.load_records(&folder_path, recursive, verbose)?.records;
+    let records = vault
+        .load_records(&folder_path, recursive, verbose)?
+        .records;
 
     if records.is_empty() {
         println!("No records found in '{}'", folder);

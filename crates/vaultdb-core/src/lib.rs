@@ -57,12 +57,12 @@ pub mod schema;
 pub mod vault;
 pub mod writer;
 
-pub use record::{Record, Value};
 pub use error::{ParseError, Result, VaultdbError};
-pub use vault::{LoadResult, Vault};
-pub use query::{Expr, Predicate, LinkPredicate, CompareOp, Query, SortKey};
 pub use links::{Direction, GraphScope, LinkGraph, UnresolvedLink};
 pub use mutation::{
     DeleteBuilder, MoveBuilder, MutationError, MutationReport, PlannedChange, RenameBuilder,
     UpdateBuilder,
 };
+pub use query::{CompareOp, Expr, LinkPredicate, Predicate, Query, SortKey};
+pub use record::{Record, Value};
+pub use vault::{LoadResult, Vault};

@@ -2,9 +2,9 @@
 //!
 //! Walks `Expr` and `Predicate` trees against a [`Record`] (and an optional
 //! [`crate::links::LinkGraph`] for graph predicates) and returns `bool`.
-//! Also still hosts the legacy internal `WhereClause`/`WhereExpr` types and
-//! their where-DSL parser, used by `<Expr as FromStr>::from_str` via a
-//! conversion shim.
+//! Also hosts the where-DSL parser and its internal `WhereClause`/`WhereExpr`
+//! types — the parser produces the internal AST and converts to `Expr` at
+//! the public boundary via `WhereClause::to_expr`.
 
 use std::path::Path;
 
@@ -86,7 +86,6 @@ impl WhereClause {
         }
         Ok(WhereClause { alternatives })
     }
-
 }
 
 impl WhereExpr {
@@ -177,14 +176,14 @@ impl WhereExpr {
     // `to_expr`/`to_predicate_expr`/`to_predicate`.
 }
 
-
 // ── Public query AST bridge ────────────────────────────────────────────────
 
-/// Parse a where-DSL string into a `WhereClause` (internal AST).
+/// Parse a where-DSL string into the internal `WhereClause` AST.
 ///
-/// Public-but-internal: the public `Expr` type's `FromStr` delegates here.
-/// This function will be removed once `filter.rs` is fully migrated to the
-/// new AST in a later task.
+/// Public-but-crate-internal: the public `Expr`'s `FromStr` delegates here
+/// and immediately converts to `Expr` via `WhereClause::to_expr`. The
+/// internal AST is kept because it's the natural output shape of the
+/// recursive-descent parser; no consumer outside of this module uses it.
 pub(crate) fn parse_where_clause(input: &str) -> Result<WhereClause> {
     WhereClause::parse(input)
 }
@@ -519,6 +518,27 @@ mod tests {
         let e2 = E::parse("rating !exists").unwrap();
         assert!(matches!(e2, E::Not(_)));
     }
+
+    #[test]
+    fn compare_values_cross_numeric_uses_float_scale() {
+        use crate::record::Value as V;
+        use std::cmp::Ordering;
+
+        // Integer vs Float should not fall through to debug-string ordering
+        // (which would put "Float(2.5)" before "Integer(3)" alphabetically).
+        assert_eq!(
+            compare_values(&V::Integer(3), &V::Float(2.5)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_values(&V::Float(2.5), &V::Integer(3)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_values(&V::Integer(2), &V::Float(2.0)),
+            Ordering::Equal
+        );
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -546,8 +566,12 @@ pub fn evaluate_expr(
     use crate::query::{Expr, LinkPredicate};
     match expr {
         Expr::Predicate(p) => evaluate_predicate(p, record, vault_root, link_index),
-        Expr::And(es) => es.iter().all(|e| evaluate_expr(e, record, vault_root, link_index)),
-        Expr::Or(es) => es.iter().any(|e| evaluate_expr(e, record, vault_root, link_index)),
+        Expr::And(es) => es
+            .iter()
+            .all(|e| evaluate_expr(e, record, vault_root, link_index)),
+        Expr::Or(es) => es
+            .iter()
+            .any(|e| evaluate_expr(e, record, vault_root, link_index)),
         Expr::Not(e) => !evaluate_expr(e, record, vault_root, link_index),
         Expr::LinksTo(lp) => match (link_index, lp) {
             (Some(idx), LinkPredicate::Target(name)) => idx
@@ -557,9 +581,10 @@ pub fn evaluate_expr(
                 .outgoing_links(&record.virtual_name())
                 .iter()
                 .any(|target_name| {
-                    idx.record_by_name(target_name).is_some_and(|target_record| {
-                        evaluate_expr(inner, target_record, vault_root, Some(idx))
-                    })
+                    idx.record_by_name(target_name)
+                        .is_some_and(|target_record| {
+                            evaluate_expr(inner, target_record, vault_root, Some(idx))
+                        })
                 }),
             (None, _) => false,
         },
@@ -571,9 +596,10 @@ pub fn evaluate_expr(
                 .incoming_links(&record.virtual_name())
                 .iter()
                 .any(|source_name| {
-                    idx.record_by_name(source_name).is_some_and(|source_record| {
-                        evaluate_expr(inner, source_record, vault_root, Some(idx))
-                    })
+                    idx.record_by_name(source_name)
+                        .is_some_and(|source_record| {
+                            evaluate_expr(inner, source_record, vault_root, Some(idx))
+                        })
                 }),
             (None, _) => false,
         },
@@ -637,20 +663,30 @@ pub fn evaluate_predicate(
     }
 }
 
-/// Total order over `Value` for sorting. Mixed types fall back to debug-string
-/// comparison so that sort is always stable.
+/// Total order over `Value` for sorting and `Compare` predicate evaluation.
+///
+/// Numeric values (`Integer` / `Float`) are compared on a common float scale
+/// regardless of their stored representation, so `hsk > 2` and `rating < 8.5`
+/// behave the same when the field happens to be parsed as `Integer` vs
+/// `Float`. Same-type non-numeric pairs (string-string, bool-bool) compare
+/// directly. Mixed-shape pairs fall back to debug-string comparison so the
+/// order is always total and stable.
 pub fn compare_values(a: &crate::record::Value, b: &crate::record::Value) -> std::cmp::Ordering {
     use crate::record::Value;
     match (a, b) {
-        (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
-        (Value::Float(x), Value::Float(y)) => {
-            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-        }
-        (Value::String(x), Value::String(y)) => x.cmp(y),
-        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
         (Value::Null, _) => std::cmp::Ordering::Less,
         (_, Value::Null) => std::cmp::Ordering::Greater,
+        (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        // Cross-numeric: Integer vs Float — compare on common float scale.
+        (Value::Integer(_) | Value::Float(_), Value::Integer(_) | Value::Float(_)) => {
+            let af = a.as_float().unwrap_or(0.0);
+            let bf = b.as_float().unwrap_or(0.0);
+            af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
+        }
         _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
     }
 }
