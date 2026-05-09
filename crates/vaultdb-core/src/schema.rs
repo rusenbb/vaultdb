@@ -33,7 +33,7 @@ pub struct FieldSchema {
     pub field_type: String,
     #[serde(rename = "enum")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub enum_values: Vec<serde_yaml::Value>,
+    pub enum_values: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,8 +109,10 @@ pub fn validate_record(
         if !field_schema.enum_values.is_empty() {
             let display = value.display_value();
             let matches_enum = field_schema.enum_values.iter().any(|e| match e {
-                serde_yaml::Value::String(s) => s == &display,
-                serde_yaml::Value::Number(n) => n.to_string() == display,
+                Value::String(s) => s == &display,
+                Value::Integer(i) => i.to_string() == display,
+                Value::Float(f) => f.to_string() == display,
+                Value::Bool(b) => b.to_string() == display,
                 _ => false,
             });
             if !matches_enum {
@@ -123,7 +125,7 @@ pub fn validate_record(
                         field_schema
                             .enum_values
                             .iter()
-                            .map(yaml_value_display)
+                            .map(value_display)
                             .collect::<Vec<_>>()
                     ),
                 });
@@ -156,12 +158,13 @@ pub fn validate_record(
     violations
 }
 
-fn yaml_value_display(v: &serde_yaml::Value) -> String {
+fn value_display(v: &Value) -> String {
     match v {
-        serde_yaml::Value::String(s) => s.clone(),
-        serde_yaml::Value::Number(n) => n.to_string(),
-        serde_yaml::Value::Bool(b) => b.to_string(),
-        serde_yaml::Value::Null => "null".to_string(),
+        Value::String(s) => s.clone(),
+        Value::Integer(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "null".to_string(),
         other => format!("{:?}", other),
     }
 }
@@ -240,11 +243,11 @@ pub fn infer_schema(folder_name: &str, records: &[crate::record::Record]) -> Col
                 unique
                     .into_iter()
                     .map(|v| {
-                        // Try to parse as number
+                        // Try to parse as integer
                         if let Ok(n) = v.parse::<i64>() {
-                            serde_yaml::Value::Number(serde_yaml::Number::from(n))
+                            Value::Integer(n)
                         } else {
-                            serde_yaml::Value::String(v)
+                            Value::String(v)
                         }
                     })
                     .collect()
@@ -346,8 +349,8 @@ mod tests {
             FieldSchema {
                 field_type: "string".into(),
                 enum_values: vec![
-                    serde_yaml::Value::String("to-watch".into()),
-                    serde_yaml::Value::String("watched".into()),
+                    Value::String("to-watch".into()),
+                    Value::String("watched".into()),
                 ],
                 min: None,
                 max: None,
@@ -404,7 +407,7 @@ mod tests {
             "status".into(),
             FieldSchema {
                 field_type: "string".into(),
-                enum_values: vec![serde_yaml::Value::String("to-watch".into())],
+                enum_values: vec![Value::String("to-watch".into())],
                 min: None,
                 max: None,
                 required: None,

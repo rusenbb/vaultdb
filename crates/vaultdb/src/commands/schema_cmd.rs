@@ -39,8 +39,11 @@ pub fn run_show(vault: &Vault, folder: &str) -> Result<()> {
                         .enum_values
                         .iter()
                         .map(|v| match v {
-                            serde_yaml::Value::String(s) => s.clone(),
-                            serde_yaml::Value::Number(n) => n.to_string(),
+                            vaultdb_core::Value::String(s) => s.clone(),
+                            vaultdb_core::Value::Integer(i) => i.to_string(),
+                            vaultdb_core::Value::Float(f) => f.to_string(),
+                            vaultdb_core::Value::Bool(b) => b.to_string(),
+                            vaultdb_core::Value::Null => "null".to_string(),
                             other => format!("{:?}", other),
                         })
                         .collect();
