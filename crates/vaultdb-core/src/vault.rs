@@ -174,6 +174,36 @@ impl Vault {
 
         Ok(LoadResult { records, parse_errors })
     }
+
+    /// Look up a single record by its filename (without the `.md` extension)
+    /// inside the given folder.
+    ///
+    /// Returns `Ok(None)` if no such file exists. Returns `Ok(Some(record))`
+    /// when the file exists and parses cleanly. Returns
+    /// `Err(VaultdbError::InvalidFrontmatter)` if the file exists but its
+    /// frontmatter is malformed — unlike `load_records`, single-record lookup
+    /// surfaces parse errors as a hard error because the caller asked for one
+    /// specific record.
+    pub fn find_by_name(
+        &self,
+        folder: &str,
+        name: &str,
+    ) -> Result<Option<Record>> {
+        let folder_path = self.resolve_folder(folder)?;
+        let candidate = folder_path.join(format!("{}.md", name));
+        if !candidate.is_file() {
+            return Ok(None);
+        }
+        match frontmatter::load_record(&candidate) {
+            Ok(record) => Ok(Some(record)),
+            Err(VaultdbError::NoFrontmatter(_)) => Ok(Some(Record {
+                path: candidate,
+                fields: std::collections::BTreeMap::new(),
+                raw_content: None,
+            })),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -310,5 +340,49 @@ mod tests {
 
         assert_eq!(files_flat.len(), 3);
         assert_eq!(files_recursive.len(), 4); // includes nested.md
+    }
+
+    #[test]
+    fn find_by_name_existing() {
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let r = vault.find_by_name("notes", "test1").unwrap();
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().virtual_name(), "test1");
+    }
+
+    #[test]
+    fn find_by_name_missing() {
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let r = vault.find_by_name("notes", "no-such-record").unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn find_by_name_no_frontmatter_loads_as_empty() {
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        // create_test_vault() writes notes/no_fm.md with no frontmatter
+        let r = vault.find_by_name("notes", "no_fm").unwrap().unwrap();
+        assert!(r.fields.is_empty());
+        assert_eq!(r.virtual_name(), "no_fm");
+    }
+
+    #[test]
+    fn find_by_name_invalid_frontmatter_errors() {
+        use std::fs;
+        let dir = create_test_vault();
+        fs::write(
+            dir.path().join("notes/broken.md"),
+            "---\n: : :\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let result = vault.find_by_name("notes", "broken");
+        assert!(matches!(
+            result,
+            Err(VaultdbError::InvalidFrontmatter { .. })
+        ));
     }
 }
