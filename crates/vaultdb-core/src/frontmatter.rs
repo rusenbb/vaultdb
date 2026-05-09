@@ -1,3 +1,6 @@
+//! YAML frontmatter parsing. Internal — the public surface is
+//! [`crate::Vault::load_records`] / [`crate::Vault::find_by_name`].
+
 use std::collections::BTreeMap;
 use std::path::Path;
 

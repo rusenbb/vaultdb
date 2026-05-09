@@ -1,3 +1,8 @@
+//! [`Vault`]: the library entry point. Discovers a vault from `.obsidian/`,
+//! lists files, loads records, runs structured queries, builds the link
+//! graph. Also defines [`LoadResult`], the parse-diagnostic-bearing return
+//! type from `Vault::load_records`.
+
 use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;

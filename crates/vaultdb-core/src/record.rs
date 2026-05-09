@@ -1,3 +1,7 @@
+//! [`Record`] (one parsed `.md` file) and [`Value`] (the typed cell values).
+//! Records have virtual fields (`_name`, `_path`, `_modified`, etc.)
+//! computed lazily from the path and frontmatter.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;

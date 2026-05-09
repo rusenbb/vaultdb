@@ -1,3 +1,7 @@
+//! Schema inference and validation. `infer_schema` walks records to discover
+//! field types and cardinalities; `validate_record` checks a record against a
+//! schema; `schema_to_yaml` renders a schema to YAML for persistence.
+
 use std::collections::BTreeMap;
 use std::path::Path;
 

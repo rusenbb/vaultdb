@@ -1,3 +1,8 @@
+//! [`LinkGraph`] (the citation graph from a vault's `[[wikilinks]]`) plus the
+//! traversal types: [`Direction`], [`GraphScope`], [`UnresolvedLink`].
+//! Supports outgoing/incoming queries, BFS traversal, and unresolved-link
+//! discovery.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use regex::Regex;

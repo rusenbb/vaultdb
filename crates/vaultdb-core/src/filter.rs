@@ -1,3 +1,11 @@
+//! Evaluator for the public [`crate::query::Expr`] AST.
+//!
+//! Walks `Expr` and `Predicate` trees against a [`Record`] (and an optional
+//! [`crate::links::LinkGraph`] for graph predicates) and returns `bool`.
+//! Also still hosts the legacy internal `WhereClause`/`WhereExpr` types and
+//! their where-DSL parser, used by `<Expr as FromStr>::from_str` via a
+//! conversion shim.
+
 use std::path::Path;
 
 use regex::Regex;

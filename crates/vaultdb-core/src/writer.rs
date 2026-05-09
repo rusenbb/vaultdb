@@ -1,3 +1,8 @@
+//! Frontmatter write primitives. [`set_field`], [`unset_field`], [`add_tag`],
+//! [`remove_tag`] each return `(new_content, ChangeDescription)` without
+//! touching disk; [`apply`] flushes a [`WriteResult`] to the filesystem. The
+//! public mutation builders in [`crate::mutation`] wrap these.
+
 use crate::error::{Result, VaultdbError};
 
 /// Describes a single change made to a file.

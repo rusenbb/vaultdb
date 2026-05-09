@@ -1,3 +1,6 @@
+//! Error types: [`VaultdbError`] for fatal failures, [`ParseError`] for
+//! non-fatal per-file diagnostics returned by [`crate::LoadResult`].
+
 use std::path::PathBuf;
 use thiserror::Error;
 
