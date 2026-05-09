@@ -16,4 +16,7 @@ pub use error::ParseError;
 pub use vault::{LoadResult, Vault};
 pub use query::{Expr, Predicate, LinkPredicate, CompareOp, Query, SortKey};
 pub use links::{Direction, GraphScope, LinkGraph, UnresolvedLink};
-pub use mutation::{MutationError, MutationReport, PlannedChange, UpdateBuilder};
+pub use mutation::{
+    DeleteBuilder, MoveBuilder, MutationError, MutationReport, PlannedChange, RenameBuilder,
+    UpdateBuilder,
+};

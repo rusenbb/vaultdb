@@ -199,6 +199,355 @@ impl UpdateBuilder {
     }
 }
 
+// ── DeleteBuilder ──────────────────────────────────────────────────────────
+
+/// Build a delete mutation. Records matching `filter` are moved to
+/// `<vault>/.trash/` by default (collision-safe). With `permanent(true)`,
+/// files are removed entirely.
+#[derive(Debug, Clone)]
+pub struct DeleteBuilder {
+    filter: Expr,
+    folder: String,
+    permanent: bool,
+}
+
+impl DeleteBuilder {
+    pub fn new(folder: impl Into<String>, filter: Expr) -> Self {
+        Self {
+            filter,
+            folder: folder.into(),
+            permanent: false,
+        }
+    }
+
+    pub fn permanent(mut self, yes: bool) -> Self {
+        self.permanent = yes;
+        self
+    }
+
+    pub fn plan(&self, vault: &Vault) -> Result<MutationReport> {
+        let folder_path = vault.resolve_folder(&self.folder)?;
+        let load = vault.load_records(&folder_path, false, false)?;
+        let needs_links = crate::filter::expr_uses_links(&self.filter);
+        let link_index = if needs_links {
+            Some(crate::links::LinkGraph::build_with_root(
+                &load.records,
+                Some(&vault.root),
+            ))
+        } else {
+            None
+        };
+
+        let mut changes = Vec::new();
+        for r in &load.records {
+            if !crate::filter::evaluate_expr(&self.filter, r, &vault.root, link_index.as_ref()) {
+                continue;
+            }
+            changes.push(PlannedChange {
+                path: r.path.clone(),
+                description: if self.permanent {
+                    "delete (permanent)".to_string()
+                } else {
+                    "move to .trash/".to_string()
+                },
+            });
+        }
+        Ok(MutationReport {
+            changes,
+            errors: Vec::new(),
+        })
+    }
+
+    pub fn execute(self, vault: &Vault) -> Result<MutationReport> {
+        let report = self.plan(vault)?;
+        let mut errors = Vec::new();
+
+        if self.permanent {
+            for change in &report.changes {
+                if let Err(e) = std::fs::remove_file(&change.path) {
+                    errors.push(MutationError {
+                        path: change.path.clone(),
+                        message: format!("remove failed: {}", e),
+                    });
+                }
+            }
+        } else {
+            let trash_dir = vault.root.join(".trash");
+            if !report.changes.is_empty() {
+                if let Err(e) = std::fs::create_dir_all(&trash_dir) {
+                    return Err(VaultdbError::Io(e));
+                }
+            }
+            for change in &report.changes {
+                let dest = unique_in_dir(&trash_dir, &change.path);
+                if let Err(e) = std::fs::rename(&change.path, &dest) {
+                    errors.push(MutationError {
+                        path: change.path.clone(),
+                        message: format!("trash failed: {}", e),
+                    });
+                }
+            }
+        }
+
+        Ok(MutationReport {
+            changes: report.changes,
+            errors,
+        })
+    }
+}
+
+fn unique_in_dir(dir: &std::path::Path, src: &std::path::Path) -> PathBuf {
+    let filename = src.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let candidate = dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = src.file_stem().and_then(|n| n.to_str()).unwrap_or("file");
+    let ext = src.extension().and_then(|n| n.to_str()).unwrap_or("md");
+    let mut i = 1;
+    loop {
+        let c = dir.join(format!("{}-{}.{}", stem, i, ext));
+        if !c.exists() {
+            return c;
+        }
+        i += 1;
+    }
+}
+
+// ── MoveBuilder ────────────────────────────────────────────────────────────
+
+/// Build a move mutation. Records matching `filter` are relocated into
+/// `to_folder` (created if needed). Filename collisions at the destination
+/// surface as `MutationError`s in the report.
+#[derive(Debug, Clone)]
+pub struct MoveBuilder {
+    filter: Expr,
+    folder: String,
+    to_folder: String,
+}
+
+impl MoveBuilder {
+    pub fn new(
+        folder: impl Into<String>,
+        to_folder: impl Into<String>,
+        filter: Expr,
+    ) -> Self {
+        Self {
+            filter,
+            folder: folder.into(),
+            to_folder: to_folder.into(),
+        }
+    }
+
+    pub fn plan(&self, vault: &Vault) -> Result<MutationReport> {
+        let folder_path = vault.resolve_folder(&self.folder)?;
+        let to_path = vault.root.join(&self.to_folder);
+        let load = vault.load_records(&folder_path, false, false)?;
+        let needs_links = crate::filter::expr_uses_links(&self.filter);
+        let link_index = if needs_links {
+            Some(crate::links::LinkGraph::build_with_root(
+                &load.records,
+                Some(&vault.root),
+            ))
+        } else {
+            None
+        };
+
+        let mut changes = Vec::new();
+        let mut errors = Vec::new();
+
+        for r in &load.records {
+            if !crate::filter::evaluate_expr(&self.filter, r, &vault.root, link_index.as_ref()) {
+                continue;
+            }
+            let filename = match r.path.file_name() {
+                Some(n) => n,
+                None => continue,
+            };
+            let dest = to_path.join(filename);
+            if dest.exists() {
+                errors.push(MutationError {
+                    path: r.path.clone(),
+                    message: format!(
+                        "move conflict: {} already exists in {}",
+                        filename.to_string_lossy(),
+                        self.to_folder
+                    ),
+                });
+                continue;
+            }
+            changes.push(PlannedChange {
+                path: r.path.clone(),
+                description: format!("move to {}", dest.display()),
+            });
+        }
+        Ok(MutationReport { changes, errors })
+    }
+
+    pub fn execute(self, vault: &Vault) -> Result<MutationReport> {
+        let to_path = vault.root.join(&self.to_folder);
+        let report = self.plan(vault)?;
+        if !report.changes.is_empty() {
+            std::fs::create_dir_all(&to_path).map_err(VaultdbError::Io)?;
+        }
+        let mut errors = report.errors;
+        for change in &report.changes {
+            let filename = match change.path.file_name() {
+                Some(n) => n,
+                None => continue,
+            };
+            let dest = to_path.join(filename);
+            if let Err(e) = std::fs::rename(&change.path, &dest) {
+                errors.push(MutationError {
+                    path: change.path.clone(),
+                    message: format!("rename failed: {}", e),
+                });
+            }
+        }
+        Ok(MutationReport {
+            changes: report.changes,
+            errors,
+        })
+    }
+}
+
+// ── RenameBuilder ──────────────────────────────────────────────────────────
+
+/// Build a rename mutation. The single record at `<folder>/<from>.md` is
+/// renamed to `<folder>/<to>.md`, and every `[[wikilink]]` across the vault
+/// pointing at `from` is rewritten to point at `to`.
+///
+/// Handled wikilink shapes: `[[from]]`, `[[from|alias]]`, `[[from#section]]`,
+/// `[[from#section|alias]]`.
+#[derive(Debug, Clone)]
+pub struct RenameBuilder {
+    folder: String,
+    from: String,
+    to: String,
+}
+
+impl RenameBuilder {
+    pub fn new(
+        folder: impl Into<String>,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Self {
+        Self {
+            folder: folder.into(),
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    pub fn plan(&self, vault: &Vault) -> Result<MutationReport> {
+        let folder_path = vault.resolve_folder(&self.folder)?;
+        let source = folder_path.join(format!("{}.md", self.from));
+        let dest = folder_path.join(format!("{}.md", self.to));
+
+        let mut changes = Vec::new();
+        let mut errors = Vec::new();
+
+        if !source.is_file() {
+            errors.push(MutationError {
+                path: source.clone(),
+                message: format!("source `{}` not found", self.from),
+            });
+            return Ok(MutationReport { changes, errors });
+        }
+        if dest.exists() {
+            errors.push(MutationError {
+                path: dest.clone(),
+                message: format!("target `{}.md` already exists", self.to),
+            });
+            return Ok(MutationReport { changes, errors });
+        }
+
+        changes.push(PlannedChange {
+            path: source.clone(),
+            description: format!("rename to {}", dest.display()),
+        });
+
+        // Find every record that links to `self.from` and add a planned
+        // backlink-rewrite change.
+        let all = vault.load_records_with_content(&vault.root, true, false)?;
+        let graph = crate::links::LinkGraph::build_with_root(&all.records, Some(&vault.root));
+        for source_name in graph.incoming_links(&self.from) {
+            if let Some(record) = graph.record_by_name(source_name) {
+                changes.push(PlannedChange {
+                    path: record.path.clone(),
+                    description: format!(
+                        "rewrite [[{}]] -> [[{}]]",
+                        self.from, self.to
+                    ),
+                });
+            }
+        }
+
+        Ok(MutationReport { changes, errors })
+    }
+
+    pub fn execute(self, vault: &Vault) -> Result<MutationReport> {
+        let folder_path = vault.resolve_folder(&self.folder)?;
+        let source = folder_path.join(format!("{}.md", self.from));
+        let dest = folder_path.join(format!("{}.md", self.to));
+
+        let report = self.plan(vault)?;
+        // If the plan reported errors at the source/dest stage, don't proceed.
+        if !report.errors.is_empty() {
+            return Ok(report);
+        }
+
+        let mut errors = Vec::new();
+
+        // Rename the source file
+        if let Err(e) = std::fs::rename(&source, &dest) {
+            return Ok(MutationReport {
+                changes: report.changes,
+                errors: vec![MutationError {
+                    path: source,
+                    message: format!("rename failed: {}", e),
+                }],
+            });
+        }
+
+        // Rewrite incoming wikilinks
+        for change in report.changes.iter().skip(1) {
+            let path = &change.path;
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(MutationError {
+                        path: path.clone(),
+                        message: format!("read failed: {}", e),
+                    });
+                    continue;
+                }
+            };
+            let new_content = rewrite_wikilinks(&content, &self.from, &self.to);
+            if let Err(e) = std::fs::write(path, new_content) {
+                errors.push(MutationError {
+                    path: path.clone(),
+                    message: format!("write failed: {}", e),
+                });
+            }
+        }
+
+        Ok(MutationReport {
+            changes: report.changes,
+            errors,
+        })
+    }
+}
+
+/// Rewrite `[[from]]` (and `[[from|alias]]`, `[[from#section]]`,
+/// `[[from#section|alias]]`) to point at `to`.
+fn rewrite_wikilinks(content: &str, from: &str, to: &str) -> String {
+    content
+        .replace(&format!("[[{}]]", from), &format!("[[{}]]", to))
+        .replace(&format!("[[{}|", from), &format!("[[{}|", to))
+        .replace(&format!("[[{}#", from), &format!("[[{}#", to))
+}
+
 /// Render a `Value` as a YAML scalar suitable for inline frontmatter.
 ///
 /// String values are quoted via `writer::quote_value` to match the existing
@@ -238,6 +587,139 @@ mod tests {
         assert_eq!(b.unset_fields.len(), 1);
         assert_eq!(b.add_tags.len(), 1);
         assert_eq!(b.remove_tags.len(), 1);
+    }
+
+    #[test]
+    fn delete_builder_trash_moves_to_dot_trash() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/a.md"),
+            "---\nstatus: stale\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "status".into(),
+            value: Value::String("stale".into()),
+        });
+        let builder = DeleteBuilder::new("notes", filter);
+        let report = builder.execute(&vault).unwrap();
+        assert_eq!(report.changes.len(), 1);
+        assert_eq!(report.errors.len(), 0);
+        assert!(!dir.path().join("notes/a.md").exists());
+        assert!(dir.path().join(".trash/a.md").exists());
+    }
+
+    #[test]
+    fn delete_builder_permanent_removes_file() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/a.md"),
+            "---\nstatus: stale\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "status".into(),
+            value: Value::String("stale".into()),
+        });
+        let builder = DeleteBuilder::new("notes", filter).permanent(true);
+        builder.execute(&vault).unwrap();
+        assert!(!dir.path().join("notes/a.md").exists());
+        assert!(!dir.path().join(".trash/a.md").exists());
+    }
+
+    #[test]
+    fn move_builder_relocates_files() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/a.md"),
+            "---\nstatus: archived\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "status".into(),
+            value: Value::String("archived".into()),
+        });
+        let builder = MoveBuilder::new("notes", "archive", filter);
+        let report = builder.execute(&vault).unwrap();
+        assert_eq!(report.changes.len(), 1);
+        assert_eq!(report.errors.len(), 0);
+        assert!(!dir.path().join("notes/a.md").exists());
+        assert!(dir.path().join("archive/a.md").exists());
+    }
+
+    #[test]
+    fn rename_builder_renames_and_rewrites_links() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/old.md"),
+            "---\nstatus: x\n---\nBody\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes/source.md"),
+            "---\nstatus: y\n---\nLinks to [[old]] and [[old|alias]] and [[old#section]].\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let builder = RenameBuilder::new("notes", "old", "new");
+        let report = builder.execute(&vault).unwrap();
+        // 1 rename + 1 backlink rewrite = 2 changes
+        assert_eq!(report.changes.len(), 2);
+        assert_eq!(report.errors.len(), 0);
+        assert!(!dir.path().join("notes/old.md").exists());
+        assert!(dir.path().join("notes/new.md").exists());
+        let source_after = fs::read_to_string(dir.path().join("notes/source.md")).unwrap();
+        assert!(source_after.contains("[[new]]"));
+        assert!(source_after.contains("[[new|alias]]"));
+        assert!(source_after.contains("[[new#section]]"));
+        assert!(!source_after.contains("[[old"));
+    }
+
+    #[test]
+    fn rename_builder_target_conflict_returns_error() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/old.md"),
+            "---\nstatus: x\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes/new.md"),
+            "---\nstatus: y\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let report = RenameBuilder::new("notes", "old", "new")
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(report.changes.len(), 0);
+        assert_eq!(report.errors.len(), 1);
+        // Source file should be untouched
+        assert!(dir.path().join("notes/old.md").exists());
     }
 
     #[test]
