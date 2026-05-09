@@ -63,6 +63,8 @@ pub struct LinkIndex {
     pub incoming: BTreeMap<String, BTreeSet<String>>,
     /// filename -> list of relative paths (for detecting duplicates)
     pub name_to_paths: BTreeMap<String, Vec<String>>,
+    /// note name -> Record (for link-predicate evaluation)
+    records_by_name: BTreeMap<String, Record>,
 }
 
 impl LinkIndex {
@@ -76,14 +78,15 @@ impl LinkIndex {
     pub fn build_with_root(records: &[Record], vault_root: Option<&std::path::Path>) -> Self {
         let mut index = LinkIndex::default();
 
-        // First pass: build name -> paths mapping to detect duplicates
+        // First pass: build name -> paths mapping and name -> record mapping.
         for record in records {
             let name = record.virtual_name();
             let rel_path = match vault_root {
                 Some(root) => record.virtual_path(root),
                 None => record.path.to_string_lossy().into_owned(),
             };
-            index.name_to_paths.entry(name).or_default().push(rel_path);
+            index.name_to_paths.entry(name.clone()).or_default().push(rel_path);
+            index.records_by_name.entry(name).or_insert_with(|| record.clone());
         }
 
         // Second pass: extract links and resolve targets
@@ -105,6 +108,11 @@ impl LinkIndex {
         }
 
         index
+    }
+
+    /// Look up a record by its virtual name (filename without `.md`).
+    pub fn record_by_name(&self, name: &str) -> Option<&Record> {
+        self.records_by_name.get(name)
     }
 
     /// Resolve a wiki-link target to a note name.

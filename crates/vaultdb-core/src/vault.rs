@@ -204,6 +204,200 @@ impl Vault {
             Err(e) => Err(e),
         }
     }
+
+    /// Run a structured query against the vault. Returns the matching records,
+    /// optionally projected, sorted, and limited per the `Query`'s fields.
+    ///
+    /// The records returned have `raw_content` set to `None` (use
+    /// `load_records_with_content` if you need the body text).
+    pub fn query(&self, q: &crate::query::Query) -> Result<Vec<Record>> {
+        let folder_path = self.resolve_folder(&q.folder)?;
+        let load = self.load_records(&folder_path, q.recursive, false)?;
+        let mut records = load.records;
+
+        // Build a LinkIndex if the filter references the link graph.
+        let needs_links = q.filter.as_ref().map_or(false, expr_uses_links);
+        let link_index = if needs_links {
+            Some(crate::links::LinkIndex::build(&records))
+        } else {
+            None
+        };
+
+        // Filter
+        if let Some(filter) = &q.filter {
+            records.retain(|r| {
+                evaluate_expr(filter, r, &self.root, link_index.as_ref())
+            });
+        }
+
+        // Sort
+        if let Some(sort_key) = &q.sort {
+            records.sort_by(|a, b| {
+                let av = a.get(&sort_key.field, &self.root)
+                    .unwrap_or(crate::record::Value::Null);
+                let bv = b.get(&sort_key.field, &self.root)
+                    .unwrap_or(crate::record::Value::Null);
+                let ord = compare_values(&av, &bv);
+                if sort_key.descending { ord.reverse() } else { ord }
+            });
+        }
+
+        // Limit
+        if let Some(limit) = q.limit {
+            records.truncate(limit);
+        }
+
+        // Projection (if requested, keep only selected fields plus virtual fields)
+        if let Some(select) = &q.select {
+            let select_set: std::collections::BTreeSet<&str> =
+                select.iter().map(|s| s.as_str()).collect();
+            for record in records.iter_mut() {
+                record.fields.retain(|k, _| select_set.contains(k.as_str()));
+            }
+        }
+
+        Ok(records)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Query evaluation helpers (private to this module; Task 4 moves them to
+// filter.rs once the refactor is complete).
+// ---------------------------------------------------------------------------
+
+/// Returns true if any node of `expr` references the link graph.
+fn expr_uses_links(expr: &crate::query::Expr) -> bool {
+    use crate::query::Expr;
+    match expr {
+        Expr::LinksTo(_) | Expr::LinkedFrom(_) => true,
+        Expr::Predicate(_) => false,
+        Expr::And(es) | Expr::Or(es) => es.iter().any(expr_uses_links),
+        Expr::Not(e) => expr_uses_links(e),
+    }
+}
+
+/// Evaluate an `Expr` against a single record.
+fn evaluate_expr(
+    expr: &crate::query::Expr,
+    record: &Record,
+    vault_root: &Path,
+    link_index: Option<&crate::links::LinkIndex>,
+) -> bool {
+    use crate::query::{Expr, LinkPredicate};
+    match expr {
+        Expr::Predicate(p) => evaluate_predicate(p, record, vault_root),
+        Expr::And(es) => es.iter().all(|e| evaluate_expr(e, record, vault_root, link_index)),
+        Expr::Or(es) => es.iter().any(|e| evaluate_expr(e, record, vault_root, link_index)),
+        Expr::Not(e) => !evaluate_expr(e, record, vault_root, link_index),
+        Expr::LinksTo(lp) => match (link_index, lp) {
+            (Some(idx), LinkPredicate::Target(name)) => idx
+                .outgoing_links(&record.virtual_name())
+                .iter()
+                .any(|n| *n == name.as_str()),
+            (Some(idx), LinkPredicate::Where(inner)) => idx
+                .outgoing_links(&record.virtual_name())
+                .iter()
+                .any(|target_name| {
+                    idx.record_by_name(target_name)
+                        .map_or(false, |target_record| {
+                            evaluate_expr(inner, target_record, vault_root, Some(idx))
+                        })
+                }),
+            (None, _) => false,
+        },
+        Expr::LinkedFrom(lp) => match (link_index, lp) {
+            (Some(idx), LinkPredicate::Target(name)) => idx
+                .incoming_links(&record.virtual_name())
+                .iter()
+                .any(|n| *n == name.as_str()),
+            (Some(idx), LinkPredicate::Where(inner)) => idx
+                .incoming_links(&record.virtual_name())
+                .iter()
+                .any(|source_name| {
+                    idx.record_by_name(source_name)
+                        .map_or(false, |source_record| {
+                            evaluate_expr(inner, source_record, vault_root, Some(idx))
+                        })
+                }),
+            (None, _) => false,
+        },
+    }
+}
+
+/// Evaluate a leaf `Predicate` against a single record.
+fn evaluate_predicate(
+    p: &crate::query::Predicate,
+    record: &Record,
+    vault_root: &Path,
+) -> bool {
+    use crate::query::{CompareOp, Predicate};
+    use crate::record::Value;
+
+    match p {
+        Predicate::Equals { field, value } => {
+            record.get(field, vault_root).as_ref() == Some(value)
+        }
+        Predicate::Contains { field, value } => match record.get(field, vault_root) {
+            Some(Value::String(s)) => match value {
+                Value::String(v) => s.contains(v.as_str()),
+                _ => false,
+            },
+            Some(Value::List(list)) => list.iter().any(|item| item == value),
+            _ => false,
+        },
+        Predicate::Compare { field, op, value } => {
+            let actual = match record.get(field, vault_root) {
+                Some(v) => v,
+                None => return false,
+            };
+            let ord = compare_values(&actual, value);
+            match op {
+                CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+            }
+        }
+        Predicate::Matches { field, regex } => match record.get(field, vault_root) {
+            Some(Value::String(s)) => {
+                regex::Regex::new(regex).map_or(false, |re| re.is_match(&s))
+            }
+            _ => false,
+        },
+        Predicate::StartsWith { field, value } => match record.get(field, vault_root) {
+            Some(Value::String(s)) => s.starts_with(value.as_str()),
+            _ => false,
+        },
+        Predicate::EndsWith { field, value } => match record.get(field, vault_root) {
+            Some(Value::String(s)) => s.ends_with(value.as_str()),
+            _ => false,
+        },
+        Predicate::Exists { field } => {
+            !matches!(record.get(field, vault_root), None | Some(Value::Null))
+        }
+        Predicate::Missing { field } => {
+            matches!(record.get(field, vault_root), None | Some(Value::Null))
+        }
+    }
+}
+
+/// Total order over `Value` for sorting. Mixed types fall back to debug-string
+/// comparison so that sort is always stable.
+fn compare_values(a: &crate::record::Value, b: &crate::record::Value) -> std::cmp::Ordering {
+    use crate::record::Value;
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+        (Value::Float(x), Value::Float(y)) => {
+            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
+        (Value::Null, _) => std::cmp::Ordering::Less,
+        (_, Value::Null) => std::cmp::Ordering::Greater,
+        _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
+    }
 }
 
 #[cfg(test)]
@@ -384,5 +578,99 @@ mod tests {
             result,
             Err(VaultdbError::InvalidFrontmatter { .. })
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // Vault::query tests (Task 3)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn query_basic_filter() {
+        use crate::query::{Expr, Predicate, Query};
+        use crate::record::Value;
+
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        // create_test_vault() writes test1.md (status: active) and
+        // test2.md (status: draft), plus no_fm.md (no frontmatter).
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::Predicate(Predicate::Equals {
+                field: "status".into(),
+                value: Value::String("active".into()),
+            })),
+            select: None,
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+
+        let results = vault.query(&q).unwrap();
+        assert_eq!(results.len(), 1, "only test1 has status=active");
+        assert!(results.iter().all(|r| {
+            matches!(
+                r.get("status", &vault.root),
+                Some(Value::String(ref s)) if s == "active"
+            )
+        }));
+    }
+
+    #[test]
+    fn query_with_limit_and_sort() {
+        use crate::query::{Expr, Predicate, Query, SortKey};
+
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        // Exists predicate on _name matches all 3 records; limit cuts to 2.
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::Predicate(Predicate::Exists { field: "_name".into() })),
+            select: None,
+            sort: Some(SortKey { field: "_name".into(), descending: false }),
+            limit: Some(2),
+            recursive: false,
+        };
+
+        let results = vault.query(&q).unwrap();
+        assert!(results.len() <= 2, "limit must be respected");
+        // Verify ascending sort: first element's name <= second's
+        if results.len() == 2 {
+            let a = results[0].virtual_name();
+            let b = results[1].virtual_name();
+            assert!(a <= b, "expected ascending order, got {:?} then {:?}", a, b);
+        }
+    }
+
+    #[test]
+    fn query_with_projection() {
+        use crate::query::{Expr, Predicate, Query};
+
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        // Select only "status"; after projection every record's fields map
+        // must contain only "status" (or be empty if the record had no status).
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::Predicate(Predicate::Exists { field: "_name".into() })),
+            select: Some(vec!["status".into()]),
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+
+        let results = vault.query(&q).unwrap();
+        // All 3 records are returned (no_fm.md has _name), but after projection
+        // each record's frontmatter fields should only contain "status".
+        assert!(!results.is_empty());
+        for r in &results {
+            assert!(
+                r.fields.keys().all(|k| k == "status"),
+                "expected only 'status' in fields, got {:?}",
+                r.fields.keys().collect::<Vec<_>>()
+            );
+        }
     }
 }
