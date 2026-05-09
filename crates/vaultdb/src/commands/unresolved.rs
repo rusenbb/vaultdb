@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 use colored::Colorize;
 
-use vaultdb_core::links::{LinkIndex, TraverseDirection};
+use vaultdb_core::links::TraverseDirection;
 use vaultdb_core::vault::Vault;
+use vaultdb_core::LinkGraph;
 
 /// Run the `unresolved` command — find all wiki-links pointing to non-existent files.
 /// Optionally scoped to notes within N hops of a starting note.
@@ -18,7 +19,7 @@ pub fn run_unresolved(
 ) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
     let records = vault.load_records_with_content(&folder_path, recursive, verbose)?.records;
-    let index = LinkIndex::build_with_root(&records, Some(&vault.root));
+    let index = LinkGraph::build_with_root(&records, Some(&vault.root));
 
     // Collect all known note names
     let known_names: BTreeSet<String> = records.iter().map(|r| r.virtual_name()).collect();
