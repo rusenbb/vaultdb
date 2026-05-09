@@ -1,13 +1,12 @@
 //! Public typed mutation API for vault edits.
 //!
-//! Each builder provides:
-//! - `plan(&self, vault) -> Result<MutationReport>` — read-only preview, never
-//!   touches disk.
-//! - `execute(self, vault) -> Result<MutationReport>` — apply the plan to disk
-//!   and return the same report.
+//! Each builder exposes two methods: `plan(&self, vault) -> Result<MutationReport>`
+//! produces a read-only preview without touching disk, and
+//! `execute(self, vault) -> Result<MutationReport>` applies the planned changes
+//! and returns the same shape of report.
 //!
-//! The report shape is intentionally small: a vector of `PlannedChange` (path
-//! + human-readable description) and a vector of `MutationError` for any
+//! The report shape is intentionally small — a vector of `PlannedChange` (path
+//! plus a human-readable description) and a vector of `MutationError` for any
 //! per-record failures. Consumers that need before/after frontmatter snapshots
 //! can compute them by running their own diff against the records on disk.
 
@@ -274,9 +273,7 @@ impl DeleteBuilder {
         } else {
             let trash_dir = vault.root.join(".trash");
             if !report.changes.is_empty() {
-                if let Err(e) = std::fs::create_dir_all(&trash_dir) {
-                    return Err(VaultdbError::Io(e));
-                }
+                std::fs::create_dir_all(&trash_dir).map_err(VaultdbError::Io)?;
             }
             for change in &report.changes {
                 let dest = unique_in_dir(&trash_dir, &change.path);

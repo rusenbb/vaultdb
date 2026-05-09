@@ -308,6 +308,7 @@ impl WhereExpr {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::record::Value;
@@ -552,32 +553,28 @@ pub fn evaluate_expr(
         Expr::LinksTo(lp) => match (link_index, lp) {
             (Some(idx), LinkPredicate::Target(name)) => idx
                 .outgoing_links(&record.virtual_name())
-                .iter()
-                .any(|n| *n == name.as_str()),
+                .contains(&name.as_str()),
             (Some(idx), LinkPredicate::Where(inner)) => idx
                 .outgoing_links(&record.virtual_name())
                 .iter()
                 .any(|target_name| {
-                    idx.record_by_name(target_name)
-                        .map_or(false, |target_record| {
-                            evaluate_expr(inner, target_record, vault_root, Some(idx))
-                        })
+                    idx.record_by_name(target_name).is_some_and(|target_record| {
+                        evaluate_expr(inner, target_record, vault_root, Some(idx))
+                    })
                 }),
             (None, _) => false,
         },
         Expr::LinkedFrom(lp) => match (link_index, lp) {
             (Some(idx), LinkPredicate::Target(name)) => idx
                 .incoming_links(&record.virtual_name())
-                .iter()
-                .any(|n| *n == name.as_str()),
+                .contains(&name.as_str()),
             (Some(idx), LinkPredicate::Where(inner)) => idx
                 .incoming_links(&record.virtual_name())
                 .iter()
                 .any(|source_name| {
-                    idx.record_by_name(source_name)
-                        .map_or(false, |source_record| {
-                            evaluate_expr(inner, source_record, vault_root, Some(idx))
-                        })
+                    idx.record_by_name(source_name).is_some_and(|source_record| {
+                        evaluate_expr(inner, source_record, vault_root, Some(idx))
+                    })
                 }),
             (None, _) => false,
         },
@@ -625,7 +622,7 @@ pub fn evaluate_predicate(
             }
         }
         Predicate::Matches { field, regex } => match get(field) {
-            Some(Value::String(s)) => regex::Regex::new(regex).map_or(false, |re| re.is_match(&s)),
+            Some(Value::String(s)) => regex::Regex::new(regex).is_ok_and(|re| re.is_match(&s)),
             _ => false,
         },
         Predicate::StartsWith { field, value } => match get(field) {

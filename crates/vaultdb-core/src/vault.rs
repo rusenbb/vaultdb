@@ -258,7 +258,7 @@ impl Vault {
         let folder_path = self.resolve_folder(&q.folder)?;
 
         // Determine if the filter references the link graph.
-        let needs_links = q.filter.as_ref().map_or(false, crate::filter::expr_uses_links);
+        let needs_links = q.filter.as_ref().is_some_and(crate::filter::expr_uses_links);
 
         // Load records with content if links are needed for extraction
         let load = if needs_links {
@@ -643,10 +643,7 @@ mod tests {
         let vault = Vault::with_root(dir.path().to_path_buf());
         let graph = vault.link_graph(GraphScope::All).unwrap();
         assert!(
-            graph
-                .incoming_links("test1")
-                .iter()
-                .any(|s| *s == "with_link"),
+            graph.incoming_links("test1").contains(&"with_link"),
             "expected with_link in test1's backlinks"
         );
     }
@@ -663,6 +660,6 @@ mod tests {
         .unwrap();
         let vault = Vault::with_root(dir.path().to_path_buf());
         let graph = vault.link_graph(GraphScope::Folder("notes".into())).unwrap();
-        assert!(graph.outgoing_links("with_link").iter().any(|s| *s == "test1"));
+        assert!(graph.outgoing_links("with_link").contains(&"test1"));
     }
 }
