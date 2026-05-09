@@ -778,3 +778,142 @@ mod tests {
         assert!(!matches_all(&clauses2, &record, &vault_root()));
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Query evaluator helpers (public interface for evaluating Expr/Predicate)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Returns true if any node of `expr` references the link graph.
+pub fn expr_uses_links(expr: &crate::query::Expr) -> bool {
+    use crate::query::Expr;
+    match expr {
+        Expr::LinksTo(_) | Expr::LinkedFrom(_) => true,
+        Expr::Predicate(_) => false,
+        Expr::And(es) | Expr::Or(es) => es.iter().any(expr_uses_links),
+        Expr::Not(e) => expr_uses_links(e),
+    }
+}
+
+/// Evaluate an `Expr` against a single record.
+pub fn evaluate_expr(
+    expr: &crate::query::Expr,
+    record: &Record,
+    vault_root: &Path,
+    link_index: Option<&crate::links::LinkIndex>,
+) -> bool {
+    use crate::query::{Expr, LinkPredicate};
+    match expr {
+        Expr::Predicate(p) => evaluate_predicate(p, record, vault_root),
+        Expr::And(es) => es.iter().all(|e| evaluate_expr(e, record, vault_root, link_index)),
+        Expr::Or(es) => es.iter().any(|e| evaluate_expr(e, record, vault_root, link_index)),
+        Expr::Not(e) => !evaluate_expr(e, record, vault_root, link_index),
+        Expr::LinksTo(lp) => match (link_index, lp) {
+            (Some(idx), LinkPredicate::Target(name)) => idx
+                .outgoing_links(&record.virtual_name())
+                .iter()
+                .any(|n| *n == name.as_str()),
+            (Some(idx), LinkPredicate::Where(inner)) => idx
+                .outgoing_links(&record.virtual_name())
+                .iter()
+                .any(|target_name| {
+                    idx.record_by_name(target_name)
+                        .map_or(false, |target_record| {
+                            evaluate_expr(inner, target_record, vault_root, Some(idx))
+                        })
+                }),
+            (None, _) => false,
+        },
+        Expr::LinkedFrom(lp) => match (link_index, lp) {
+            (Some(idx), LinkPredicate::Target(name)) => idx
+                .incoming_links(&record.virtual_name())
+                .iter()
+                .any(|n| *n == name.as_str()),
+            (Some(idx), LinkPredicate::Where(inner)) => idx
+                .incoming_links(&record.virtual_name())
+                .iter()
+                .any(|source_name| {
+                    idx.record_by_name(source_name)
+                        .map_or(false, |source_record| {
+                            evaluate_expr(inner, source_record, vault_root, Some(idx))
+                        })
+                }),
+            (None, _) => false,
+        },
+    }
+}
+
+/// Evaluate a leaf `Predicate` against a single record.
+pub fn evaluate_predicate(
+    p: &crate::query::Predicate,
+    record: &Record,
+    vault_root: &Path,
+) -> bool {
+    use crate::query::{CompareOp, Predicate};
+    use crate::record::Value;
+
+    match p {
+        Predicate::Equals { field, value } => {
+            record.get(field, vault_root).as_ref() == Some(value)
+        }
+        Predicate::Contains { field, value } => match record.get(field, vault_root) {
+            Some(Value::String(s)) => match value {
+                Value::String(v) => s.contains(v.as_str()),
+                _ => false,
+            },
+            Some(Value::List(list)) => list.iter().any(|item| item == value),
+            _ => false,
+        },
+        Predicate::Compare { field, op, value } => {
+            let actual = match record.get(field, vault_root) {
+                Some(v) => v,
+                None => return false,
+            };
+            let ord = compare_values(&actual, value);
+            match op {
+                CompareOp::Lt => ord == std::cmp::Ordering::Less,
+                CompareOp::Le => ord != std::cmp::Ordering::Greater,
+                CompareOp::Gt => ord == std::cmp::Ordering::Greater,
+                CompareOp::Ge => ord != std::cmp::Ordering::Less,
+                CompareOp::Ne => ord != std::cmp::Ordering::Equal,
+            }
+        }
+        Predicate::Matches { field, regex } => match record.get(field, vault_root) {
+            Some(Value::String(s)) => {
+                regex::Regex::new(regex).map_or(false, |re| re.is_match(&s))
+            }
+            _ => false,
+        },
+        Predicate::StartsWith { field, value } => match record.get(field, vault_root) {
+            Some(Value::String(s)) => s.starts_with(value.as_str()),
+            _ => false,
+        },
+        Predicate::EndsWith { field, value } => match record.get(field, vault_root) {
+            Some(Value::String(s)) => s.ends_with(value.as_str()),
+            _ => false,
+        },
+        Predicate::Exists { field } => {
+            !matches!(record.get(field, vault_root), None | Some(Value::Null))
+        }
+        Predicate::Missing { field } => {
+            matches!(record.get(field, vault_root), None | Some(Value::Null))
+        }
+    }
+}
+
+/// Total order over `Value` for sorting. Mixed types fall back to debug-string
+/// comparison so that sort is always stable.
+pub fn compare_values(a: &crate::record::Value, b: &crate::record::Value) -> std::cmp::Ordering {
+    use crate::record::Value;
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+        (Value::Float(x), Value::Float(y)) => {
+            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
+        (Value::Null, _) => std::cmp::Ordering::Less,
+        (_, Value::Null) => std::cmp::Ordering::Greater,
+        _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
+    }
+}
