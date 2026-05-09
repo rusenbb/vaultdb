@@ -7,16 +7,6 @@ use crate::cli::OutputFormat;
 use vaultdb_core::links::LinkIndex;
 use vaultdb_core::record::{Value, Record};
 
-/// Format records for display.
-pub fn format_records(
-    records: &[Record],
-    select: &[String],
-    format: &OutputFormat,
-    vault_root: &Path,
-) -> String {
-    format_records_with_links(records, select, format, vault_root, None)
-}
-
 /// Format records with optional link index for graph virtual fields.
 pub fn format_records_with_links(
     records: &[Record],
