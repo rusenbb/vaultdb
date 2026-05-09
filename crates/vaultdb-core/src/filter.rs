@@ -302,6 +302,134 @@ pub fn matches_exprs_with_links(
         .all(|expr| expr.matches_with_links(record, vault_root, link_index))
 }
 
+// ── Public query AST bridge ────────────────────────────────────────────────
+
+/// Parse a where-DSL string into a `WhereClause` (internal AST).
+///
+/// Public-but-internal: the public `Expr` type's `FromStr` delegates here.
+/// This function will be removed once `filter.rs` is fully migrated to the
+/// new AST in a later task.
+pub fn parse_where_clause(input: &str) -> Result<WhereClause> {
+    WhereClause::parse(input)
+}
+
+impl WhereClause {
+    /// Convert this internal AST into the new public `Expr` type.
+    ///
+    /// `WhereClause` holds a `Vec<WhereExpr>` with OR semantics.
+    /// - If there is exactly one alternative (the common case), return the
+    ///   expression directly to avoid a redundant single-element `Or`.
+    /// - If there are multiple alternatives, wrap them in `Expr::Or`.
+    pub fn to_expr(&self) -> crate::query::Expr {
+        let mut exprs: Vec<crate::query::Expr> = self
+            .alternatives
+            .iter()
+            .map(|alt| alt.to_predicate_expr())
+            .collect();
+
+        match exprs.len() {
+            0 => {
+                // Degenerate empty clause — treat as always-true; callers
+                // should not produce empty WhereClause, but be defensive.
+                crate::query::Expr::And(vec![])
+            }
+            1 => exprs.remove(0),
+            _ => crate::query::Expr::Or(exprs),
+        }
+    }
+}
+
+impl WhereExpr {
+    /// Convert this single internal expression into an `Expr`.
+    ///
+    /// Handles the `negated` flag by wrapping in `Expr::Not` when set.
+    fn to_predicate_expr(&self) -> crate::query::Expr {
+        let pred = crate::query::Expr::Predicate(self.to_predicate());
+        if self.negated {
+            crate::query::Expr::Not(Box::new(pred))
+        } else {
+            pred
+        }
+    }
+
+    /// Convert this single internal predicate into a `Predicate`.
+    ///
+    /// Value coercion: the internal AST stores values as `Option<String>`.
+    /// For `Equals` and `Contains` we coerce to `Value::Integer` / `Value::Float`
+    /// when the string parses as a number, falling back to `Value::String`.
+    /// For `Compare` ops the test suite expects `Value::Integer(2020)` from
+    /// `"year > 2020"`, so the same coercion applies there too.
+    pub fn to_predicate(&self) -> crate::query::Predicate {
+        use crate::filter::CompareOp as IOp;
+        use crate::query::{CompareOp as QOp, Predicate};
+        use crate::record::Value;
+
+        /// Best-effort numeric coercion of a where-clause RHS string.
+        fn coerce(s: &str) -> Value {
+            if let Ok(i) = s.parse::<i64>() {
+                return Value::Integer(i);
+            }
+            if let Ok(f) = s.parse::<f64>() {
+                return Value::Float(f);
+            }
+            Value::String(s.to_string())
+        }
+
+        let field = self.field.clone();
+        let rhs_str = self.value.as_deref().unwrap_or("");
+
+        match self.op {
+            IOp::Eq => Predicate::Equals {
+                field,
+                value: coerce(rhs_str),
+            },
+            IOp::Neq => Predicate::Compare {
+                field,
+                op: QOp::Ne,
+                value: coerce(rhs_str),
+            },
+            IOp::Gt => Predicate::Compare {
+                field,
+                op: QOp::Gt,
+                value: coerce(rhs_str),
+            },
+            IOp::Lt => Predicate::Compare {
+                field,
+                op: QOp::Lt,
+                value: coerce(rhs_str),
+            },
+            IOp::Gte => Predicate::Compare {
+                field,
+                op: QOp::Ge,
+                value: coerce(rhs_str),
+            },
+            IOp::Lte => Predicate::Compare {
+                field,
+                op: QOp::Le,
+                value: coerce(rhs_str),
+            },
+            IOp::Contains => Predicate::Contains {
+                field,
+                value: coerce(rhs_str),
+            },
+            IOp::StartsWith => Predicate::StartsWith {
+                field,
+                value: rhs_str.to_string(),
+            },
+            IOp::EndsWith => Predicate::EndsWith {
+                field,
+                value: rhs_str.to_string(),
+            },
+            IOp::Matches => Predicate::Matches {
+                field,
+                regex: rhs_str.to_string(),
+            },
+            IOp::Exists => Predicate::Exists { field },
+            IOp::Missing => Predicate::Missing { field },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
