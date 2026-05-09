@@ -5,7 +5,7 @@ use colored::Colorize;
 
 use crate::cli::OutputFormat;
 use crate::output;
-use vaultdb_core::links::LinkIndex;
+use vaultdb_core::links::LinkGraph;
 use vaultdb_core::record::{Record, Value};
 use vaultdb_core::vault::Vault;
 use vaultdb_core::{Expr, LinkPredicate};
@@ -116,7 +116,7 @@ pub fn run_query(
 
     // Build link index if needed
     let link_index = if use_graph {
-        Some(LinkIndex::build_with_root(&records, Some(&vault.root)))
+        Some(LinkGraph::build_with_root(&records, Some(&vault.root)))
     } else {
         None
     };
@@ -201,7 +201,7 @@ pub fn run_count(
     };
 
     let link_index = if use_graph {
-        Some(LinkIndex::build_with_root(&records, Some(&vault.root)))
+        Some(LinkGraph::build_with_root(&records, Some(&vault.root)))
     } else {
         None
     };

@@ -225,7 +225,7 @@ impl Vault {
         &self,
         scope: crate::links::GraphScope,
     ) -> Result<crate::links::LinkGraph> {
-        use crate::links::{GraphScope, LinkIndex};
+        use crate::links::{GraphScope, LinkGraph};
         let records: Vec<Record> = match scope {
             GraphScope::All => self
                 .load_records_with_content(&self.root, true, false)?
@@ -238,7 +238,7 @@ impl Vault {
                 let all = self
                     .load_records_with_content(&self.root, true, false)?
                     .records;
-                let idx = LinkIndex::build_with_root(&all, Some(&self.root));
+                let idx = LinkGraph::build_with_root(&all, Some(&self.root));
                 all.into_iter()
                     .filter(|r| {
                         crate::filter::evaluate_expr(&expr, r, &self.root, Some(&idx))
@@ -246,7 +246,7 @@ impl Vault {
                     .collect()
             }
         };
-        Ok(LinkIndex::build_with_root(&records, Some(&self.root)))
+        Ok(LinkGraph::build_with_root(&records, Some(&self.root)))
     }
 
     /// Run a structured query against the vault. Returns the matching records,
@@ -268,9 +268,9 @@ impl Vault {
         };
         let mut records = load.records;
 
-        // Build a LinkIndex if the filter references the link graph.
+        // Build a LinkGraph if the filter references the link graph.
         let link_index = if needs_links {
-            Some(crate::links::LinkIndex::build(&records))
+            Some(crate::links::LinkGraph::build(&records))
         } else {
             None
         };

@@ -95,15 +95,13 @@ pub fn record_links(record: &Record) -> BTreeSet<String> {
     }
 }
 
-/// Public canonical name for the link index. The `LinkIndex` name is kept as
-/// the type definition for now to avoid a sweeping rename across CLI files;
-/// `LinkGraph` is the public-API alias consumers should use going forward.
-pub type LinkGraph = LinkIndex;
-
-/// A backlink index: maps note name -> set of notes that link to it.
-/// Handles duplicate filenames by using path-based resolution.
+/// The citation graph extracted from a vault's `[[wikilinks]]`.
+///
+/// Maps note name → outgoing/incoming link sets, handles duplicate filenames
+/// across folders via path-based resolution, and retains a record-by-name map
+/// so `LinkPredicate::Where` can recurse the predicate into linked records.
 #[derive(Debug, Default)]
-pub struct LinkIndex {
+pub struct LinkGraph {
     /// note name -> outgoing link targets (as written in the wiki-links)
     pub outgoing: BTreeMap<String, BTreeSet<String>>,
     /// note name -> names of notes that link to it
@@ -114,7 +112,7 @@ pub struct LinkIndex {
     records_by_name: BTreeMap<String, Record>,
 }
 
-impl LinkIndex {
+impl LinkGraph {
     /// Build the link index from a set of records.
     /// All records must have raw_content loaded.
     pub fn build(records: &[Record]) -> Self {
@@ -123,7 +121,7 @@ impl LinkIndex {
 
     /// Build with a vault root for path resolution.
     pub fn build_with_root(records: &[Record], vault_root: Option<&std::path::Path>) -> Self {
-        let mut index = LinkIndex::default();
+        let mut index = LinkGraph::default();
 
         // First pass: build name -> paths mapping and name -> record mapping.
         for record in records {
@@ -421,7 +419,7 @@ mod tests {
             },
         ];
 
-        let index = LinkIndex::build(&records);
+        let index = LinkGraph::build(&records);
 
         // Outgoing
         assert_eq!(index.outgoing_count("A"), 2);
@@ -454,7 +452,7 @@ mod tests {
             },
         ];
 
-        let index = LinkIndex::build(&records);
+        let index = LinkGraph::build(&records);
         let fields = index.virtual_fields("A");
 
         let link_count = fields.iter().find(|(k, _)| *k == "_link_count").unwrap();
@@ -479,7 +477,7 @@ mod tests {
             raw_content: Some("".into()),
         }];
 
-        let index = LinkIndex::build(&records);
+        let index = LinkGraph::build(&records);
         let unresolved = index.unresolved();
         assert_eq!(unresolved.len(), 1, "expected one dangling link, got {:?}", unresolved);
         assert_eq!(unresolved[0].source, "a");
@@ -498,7 +496,7 @@ mod tests {
             raw_content: Some("".into()),
         }];
 
-        let index = LinkIndex::build(&records);
+        let index = LinkGraph::build(&records);
         assert!(index.unresolved().is_empty());
     }
 
@@ -510,7 +508,7 @@ mod tests {
             raw_content: Some(content.into()),
         };
         let records = vec![mk("a", "[[b]]"), mk("b", "[[c]]"), mk("c", "")];
-        let index = LinkIndex::build(&records);
+        let index = LinkGraph::build(&records);
         let names = index.traverse_from("a", 2, Direction::Outgoing);
         assert!(names.contains(&"b".to_string()));
         assert!(names.contains(&"c".to_string()));
@@ -528,7 +526,7 @@ mod tests {
             raw_content: Some(content.into()),
         };
         let records = vec![mk("a", "[[b]]"), mk("b", "[[c]]"), mk("c", "[[d]]"), mk("d", "")];
-        let index = LinkIndex::build(&records);
+        let index = LinkGraph::build(&records);
         let names = index.traverse_from("a", 1, Direction::Outgoing);
         assert!(names.contains(&"b".to_string()));
         assert!(!names.contains(&"c".to_string()), "depth=1 should not reach c");

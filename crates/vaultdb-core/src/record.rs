@@ -48,7 +48,7 @@ impl Record {
         &self,
         key: &str,
         vault_root: &Path,
-        link_index: Option<&crate::links::LinkIndex>,
+        link_index: Option<&crate::links::LinkGraph>,
     ) -> Option<Value> {
         match key {
             "_name" => Some(Value::String(self.virtual_name())),

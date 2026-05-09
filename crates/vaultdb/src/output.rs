@@ -4,7 +4,7 @@ use std::path::Path;
 use comfy_table::{ContentArrangement, Table};
 
 use crate::cli::OutputFormat;
-use vaultdb_core::links::LinkIndex;
+use vaultdb_core::links::LinkGraph;
 use vaultdb_core::record::{Value, Record};
 
 /// Format records with optional link index for graph virtual fields.
@@ -13,7 +13,7 @@ pub fn format_records_with_links(
     select: &[String],
     format: &OutputFormat,
     vault_root: &Path,
-    link_index: Option<&LinkIndex>,
+    link_index: Option<&LinkGraph>,
 ) -> String {
     let fields = if select.is_empty() {
         infer_fields(records)
@@ -49,7 +49,7 @@ fn format_table(
     records: &[Record],
     fields: &[String],
     vault_root: &Path,
-    link_index: Option<&LinkIndex>,
+    link_index: Option<&LinkGraph>,
 ) -> String {
     let mut table = Table::new();
     table.set_content_arrangement(ContentArrangement::Dynamic);
@@ -75,7 +75,7 @@ fn format_json(
     records: &[Record],
     fields: &[String],
     vault_root: &Path,
-    link_index: Option<&LinkIndex>,
+    link_index: Option<&LinkGraph>,
 ) -> String {
     let items: Vec<serde_json::Value> = records
         .iter()
@@ -98,7 +98,7 @@ fn format_yaml(
     records: &[Record],
     fields: &[String],
     vault_root: &Path,
-    link_index: Option<&LinkIndex>,
+    link_index: Option<&LinkGraph>,
 ) -> String {
     let mut output = String::new();
     for record in records {
@@ -117,7 +117,7 @@ fn format_csv(
     records: &[Record],
     fields: &[String],
     vault_root: &Path,
-    link_index: Option<&LinkIndex>,
+    link_index: Option<&LinkGraph>,
 ) -> String {
     let mut buf = Vec::new();
     {
