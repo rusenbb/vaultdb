@@ -2,9 +2,20 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use vaultdb_core::error::VaultdbError;
-use vaultdb_core::filter::{WhereClause, matches_all};
-use vaultdb_core::links::LinkIndex;
 use vaultdb_core::vault::Vault;
+use vaultdb_core::{DeleteBuilder, Expr, GraphScope};
+
+/// Build a single combined filter `Expr` from one or more `--where` strings.
+fn build_filter(where_strs: &[String]) -> Result<Expr> {
+    let exprs: Vec<Expr> = where_strs
+        .iter()
+        .map(|s| Expr::parse(s).context(format!("parsing where expression: {}", s)))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(match exprs.len() {
+        1 => exprs.into_iter().next().unwrap(),
+        _ => Expr::And(exprs),
+    })
+}
 
 /// Run the `delete` command.
 /// By default, moves files to `.trash/` in the vault root.
@@ -16,8 +27,8 @@ pub fn run_delete(
     where_strs: &[String],
     force: bool,
     dry_run: bool,
-    recursive: bool,
-    verbose: bool,
+    _recursive: bool,
+    _verbose: bool,
 ) -> Result<()> {
     if where_strs.is_empty() {
         return Err(VaultdbError::SafetyRefused {
@@ -26,42 +37,33 @@ pub fn run_delete(
         .into());
     }
 
-    let folder_path = vault.resolve_folder(folder)?;
+    let filter = build_filter(where_strs)?;
+    let plan_report = DeleteBuilder::new(folder, filter.clone())
+        .permanent(force)
+        .plan(vault)?;
 
-    let where_clauses: Vec<WhereClause> = where_strs
-        .iter()
-        .map(|s| WhereClause::parse(s).context(format!("parsing where expression: {}", s)))
-        .collect::<Result<Vec<_>>>()?;
-
-    // Load with content so we can build the link index for dangling link warnings
-    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?.records;
-    let all_records = vault.load_records_with_content(&vault.root, true, verbose)?.records;
-    let index = LinkIndex::build_with_root(&all_records, Some(&vault.root));
-
-    let matching: Vec<_> = records
-        .into_iter()
-        .filter(|r| matches_all(&where_clauses, r, &vault.root))
-        .collect();
-
-    if matching.is_empty() {
+    if plan_report.changes.is_empty() {
         println!("No matching records.");
         return Ok(());
     }
 
-    let trash_dir = vault.root.join(".trash");
-    let action_word = if force { "delete" } else { "trash" };
+    // Whole-vault link graph for dangling-link warnings.
+    let graph = vault.link_graph(GraphScope::All)?;
 
+    let action_word = if force { "delete" } else { "trash" };
     let mut total_dangling = 0;
 
-    for record in &matching {
-        let rel_path = record
+    for change in &plan_report.changes {
+        let rel_path = change
             .path
             .strip_prefix(&vault.root)
-            .unwrap_or(&record.path);
-        let name = record.virtual_name();
-
-        // Check for incoming links that will become dangling
-        let backlinks = index.incoming_links(&name);
+            .unwrap_or(&change.path);
+        let name = change
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let backlinks = graph.incoming_links(name);
 
         println!("{}: {}", action_word, rel_path.display());
         if !backlinks.is_empty() {
@@ -74,32 +76,6 @@ pub fn run_delete(
                 println!("    <- {}", bl);
             }
             total_dangling += backlinks.len();
-        }
-
-        if !dry_run {
-            if force {
-                std::fs::remove_file(&record.path)?;
-            } else {
-                if !trash_dir.exists() {
-                    std::fs::create_dir_all(&trash_dir)?;
-                }
-                let filename = record.path.file_name().unwrap();
-                let mut dest = trash_dir.join(filename);
-                // Avoid overwriting previously trashed files with the same name
-                if dest.exists() {
-                    let stem = dest.file_stem().unwrap().to_string_lossy().to_string();
-                    let ext = dest.extension().map(|e| e.to_string_lossy().to_string());
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    dest = match ext {
-                        Some(e) => trash_dir.join(format!("{}.{}.{}", stem, ts, e)),
-                        None => trash_dir.join(format!("{}.{}", stem, ts)),
-                    };
-                }
-                std::fs::rename(&record.path, &dest)?;
-            }
         }
     }
 
@@ -116,19 +92,37 @@ pub fn run_delete(
 
     if dry_run {
         let dry_msg = if force {
-            format!("{} file(s) would be deleted (dry-run)", matching.len())
+            format!(
+                "{} file(s) would be deleted (dry-run)",
+                plan_report.changes.len()
+            )
         } else {
-            format!("{} file(s) would be trashed (dry-run)", matching.len())
+            format!(
+                "{} file(s) would be trashed (dry-run)",
+                plan_report.changes.len()
+            )
         };
         println!("\n{}", dry_msg.yellow());
-    } else {
-        let msg = if force {
-            format!("{} file(s) permanently deleted", matching.len())
-        } else {
-            format!("{} file(s) moved to .trash/", matching.len())
-        };
-        println!("\n{}", msg.green());
+        return Ok(());
     }
+
+    // Actually apply.
+    let exec_report = DeleteBuilder::new(folder, filter)
+        .permanent(force)
+        .execute(vault)?;
+
+    for err in &exec_report.errors {
+        let rel = err.path.strip_prefix(&vault.root).unwrap_or(&err.path);
+        eprintln!("{} {}: {}", "error:".red(), rel.display(), err.message);
+    }
+
+    let success_count = exec_report.changes.len() - exec_report.errors.len();
+    let msg = if force {
+        format!("{} file(s) permanently deleted", success_count)
+    } else {
+        format!("{} file(s) moved to .trash/", success_count)
+    };
+    println!("\n{}", msg.green());
 
     Ok(())
 }

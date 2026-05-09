@@ -1,8 +1,8 @@
 use anyhow::Result;
 use colored::Colorize;
 
-use vaultdb_core::links::LinkIndex;
 use vaultdb_core::vault::Vault;
+use vaultdb_core::{GraphScope, RenameBuilder};
 
 /// Run the `rename` command — rename a note and update all wiki-links across the vault.
 pub fn run_rename(
@@ -11,30 +11,15 @@ pub fn run_rename(
     new_name: &str,
     folder: &str,
     dry_run: bool,
-    verbose: bool,
+    _verbose: bool,
 ) -> Result<()> {
-    let folder_path = vault.resolve_folder(folder)?;
+    // Build the link graph to do ambiguity checks before delegating to the
+    // RenameBuilder. The builder also handles target-not-found and target-
+    // exists errors itself, but the ambiguity warnings are CLI-side concerns.
+    let graph = vault.link_graph(GraphScope::All)?;
 
-    // Find the source file
-    let old_filename = format!("{}.md", old_name);
-    let old_path = folder_path.join(&old_filename);
-    if !old_path.exists() {
-        anyhow::bail!("file not found: {}", old_path.display());
-    }
-
-    let new_filename = format!("{}.md", new_name);
-    let new_path = folder_path.join(&new_filename);
-    if new_path.exists() {
-        anyhow::bail!("target already exists: {}", new_path.display());
-    }
-
-    // Load all records to find references and build link index
-    let records = vault.load_records_with_content(&vault.root, true, verbose)?.records;
-    let index = LinkIndex::build_with_root(&records, Some(&vault.root));
-
-    // Check for duplicate filenames
-    if index.is_ambiguous(old_name) {
-        let paths = index.paths_for_name(old_name);
+    if graph.is_ambiguous(old_name) {
+        let paths = graph.paths_for_name(old_name);
         eprintln!(
             "{} '{}' exists in multiple locations:",
             "warning:".yellow(),
@@ -46,96 +31,51 @@ pub fn run_rename(
         eprintln!("only renaming the one in --folder ({})", folder);
     }
 
-    if index.is_ambiguous(new_name) {
+    if graph.is_ambiguous(new_name) {
         anyhow::bail!(
             "target name '{}' already exists in multiple locations — rename would increase ambiguity",
             new_name
         );
     }
 
-    // Find all files that reference the old name
-    let backlinks = index.incoming_links(old_name);
+    let plan_report = RenameBuilder::new(folder, old_name, new_name).plan(vault)?;
+
+    if !plan_report.errors.is_empty() {
+        for err in &plan_report.errors {
+            anyhow::bail!("{}", err.message);
+        }
+    }
 
     println!("{} -> {}", old_name.bold(), new_name.bold());
     println!();
 
-    // Rename the file
-    println!(
-        "  rename: {}",
-        old_path
+    let backlink_count = plan_report.changes.len().saturating_sub(1); // first change is the rename itself
+    for (i, change) in plan_report.changes.iter().enumerate() {
+        let rel_path = change
+            .path
             .strip_prefix(&vault.root)
-            .unwrap_or(&old_path)
-            .display()
-    );
-
-    if !dry_run {
-        std::fs::rename(&old_path, &new_path)?;
-    }
-
-    // Update wiki-links in all referencing files
-    if backlinks.is_empty() {
-        println!("  no references to update");
-    } else {
-        println!("  updating {} reference(s):", backlinks.len());
-
-        // Patterns to search and replace
-        // Handle: [[OldName]], [[OldName|alias]], [[OldName#section]], [[OldName#section|alias]]
-        let search_patterns = vec![
-            format!("[[{}]]", old_name),
-            format!("[[{}|", old_name),
-            format!("[[{}#", old_name),
-        ];
-        let replace_with = vec![
-            format!("[[{}]]", new_name),
-            format!("[[{}|", new_name),
-            format!("[[{}#", new_name),
-        ];
-
-        for referrer_name in &backlinks {
-            // Find the file for this referrer
-            let referrer = records.iter().find(|r| r.virtual_name() == *referrer_name);
-            let referrer = match referrer {
-                Some(r) => r,
-                None => continue,
-            };
-
-            let content = match &referrer.raw_content {
-                Some(c) => c,
-                None => continue,
-            };
-
-            let mut updated = content.clone();
-            let mut changes = 0;
-            for (search, replace) in search_patterns.iter().zip(replace_with.iter()) {
-                let count = updated.matches(search.as_str()).count();
-                if count > 0 {
-                    updated = updated.replace(search.as_str(), replace.as_str());
-                    changes += count;
-                }
-            }
-
-            if changes > 0 {
-                let rel_path = referrer
-                    .path
-                    .strip_prefix(&vault.root)
-                    .unwrap_or(&referrer.path);
-                println!("    {} ({} link(s))", rel_path.display(), changes);
-
-                if !dry_run {
-                    std::fs::write(&referrer.path, &updated)?;
-                }
-            }
+            .unwrap_or(&change.path);
+        if i == 0 {
+            println!("  rename: {}", rel_path.display());
+        } else {
+            println!("    update: {}", rel_path.display());
         }
     }
-
-    // Also update aliases in the renamed file's own frontmatter if it references itself
-    // (rare but possible)
+    if backlink_count == 0 {
+        println!("  no references to update");
+    }
 
     if dry_run {
-        println!("\n{}", format!("(dry-run: no changes written)").yellow());
-    } else {
-        println!("\n{}", "done".green());
+        println!("\n{}", "(dry-run: no changes written)".yellow());
+        return Ok(());
     }
+
+    let exec_report = RenameBuilder::new(folder, old_name, new_name).execute(vault)?;
+    for err in &exec_report.errors {
+        let rel = err.path.strip_prefix(&vault.root).unwrap_or(&err.path);
+        eprintln!("{} {}: {}", "error:".red(), rel.display(), err.message);
+    }
+    println!("\n{}", "done".green());
 
     Ok(())
 }

@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use vaultdb_core::error::VaultdbError;
-use vaultdb_core::filter::{WhereClause, matches_all};
 use vaultdb_core::vault::Vault;
+use vaultdb_core::{Expr, MoveBuilder};
 
 /// Run the `move` command.
 pub fn run_move(
@@ -12,8 +12,8 @@ pub fn run_move(
     where_strs: &[String],
     target_folder: &str,
     dry_run: bool,
-    recursive: bool,
-    verbose: bool,
+    _recursive: bool,
+    _verbose: bool,
 ) -> Result<()> {
     if where_strs.is_empty() {
         return Err(VaultdbError::SafetyRefused {
@@ -22,69 +22,68 @@ pub fn run_move(
         .into());
     }
 
-    let folder_path = vault.resolve_folder(folder)?;
-    let target_path = vault.root.join(target_folder);
-
-    let where_clauses: Vec<WhereClause> = where_strs
+    let exprs: Vec<Expr> = where_strs
         .iter()
-        .map(|s| WhereClause::parse(s).context(format!("parsing where expression: {}", s)))
+        .map(|s| Expr::parse(s).context(format!("parsing where expression: {}", s)))
         .collect::<Result<Vec<_>>>()?;
+    let filter = match exprs.len() {
+        1 => exprs.into_iter().next().unwrap(),
+        _ => Expr::And(exprs),
+    };
 
-    let records = vault.load_records(&folder_path, recursive, verbose)?.records;
-    let matching: Vec<_> = records
-        .into_iter()
-        .filter(|r| matches_all(&where_clauses, r, &vault.root))
-        .collect();
+    let plan_report =
+        MoveBuilder::new(folder, target_folder.to_string(), filter.clone()).plan(vault)?;
 
-    if matching.is_empty() {
+    if plan_report.changes.is_empty() && plan_report.errors.is_empty() {
         println!("No matching records.");
         return Ok(());
     }
 
-    // Check for filename conflicts
-    for record in &matching {
-        let filename = record.path.file_name().unwrap();
-        let dest = target_path.join(filename);
-        if dest.exists() {
-            anyhow::bail!(
-                "conflict: {} already exists in {}",
-                filename.to_string_lossy(),
-                target_folder
-            );
+    // If the plan reported any conflicts, abort early (mirrors the existing
+    // CLI's fail-fast behaviour for filename conflicts at the destination).
+    if !plan_report.errors.is_empty() {
+        for err in &plan_report.errors {
+            anyhow::bail!("{}", err.message);
         }
     }
 
-    for record in &matching {
-        let filename = record.path.file_name().unwrap();
-        let dest = target_path.join(filename);
-        let rel_source = record
+    for change in &plan_report.changes {
+        let rel_source = change
             .path
             .strip_prefix(&vault.root)
-            .unwrap_or(&record.path);
+            .unwrap_or(&change.path);
+        let dest = vault.root.join(target_folder).join(
+            change
+                .path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("file")),
+        );
         let rel_dest = dest.strip_prefix(&vault.root).unwrap_or(&dest);
-
         println!("{} -> {}", rel_source.display(), rel_dest.display());
-
-        if !dry_run {
-            // Create target directory if it doesn't exist
-            if !target_path.exists() {
-                std::fs::create_dir_all(&target_path)?;
-            }
-            std::fs::rename(&record.path, &dest)?;
-        }
     }
 
     if dry_run {
         println!(
             "\n{}",
-            format!("{} file(s) would be moved (dry-run)", matching.len()).yellow()
+            format!(
+                "{} file(s) would be moved (dry-run)",
+                plan_report.changes.len()
+            )
+            .yellow()
         );
-    } else {
-        println!(
-            "\n{}",
-            format!("{} file(s) moved to {}", matching.len(), target_folder).green()
-        );
+        return Ok(());
     }
+
+    let exec_report = MoveBuilder::new(folder, target_folder.to_string(), filter).execute(vault)?;
+    for err in &exec_report.errors {
+        let rel = err.path.strip_prefix(&vault.root).unwrap_or(&err.path);
+        eprintln!("{} {}: {}", "error:".red(), rel.display(), err.message);
+    }
+    let success_count = exec_report.changes.len() - exec_report.errors.len();
+    println!(
+        "\n{}",
+        format!("{} file(s) moved to {}", success_count, target_folder).green()
+    );
 
     Ok(())
 }

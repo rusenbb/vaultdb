@@ -2,9 +2,8 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use vaultdb_core::error::VaultdbError;
-use vaultdb_core::filter::{WhereClause, matches_all};
 use vaultdb_core::vault::Vault;
-use vaultdb_core::writer::{self, WriteResult};
+use vaultdb_core::{Expr, MutationReport, UpdateBuilder, Value};
 
 pub enum UpdateOp {
     Set { field: String, value: String },
@@ -13,7 +12,7 @@ pub enum UpdateOp {
     RemoveTag { tag: String },
 }
 
-/// Parse --set arguments ("FIELD=VALUE") into UpdateOps.
+/// Parse --set arguments ("FIELD=VALUE") and the other flags into UpdateOps.
 pub fn parse_operations(
     set: &[String],
     unset: &[String],
@@ -64,8 +63,8 @@ pub fn run_update(
     where_strs: &[String],
     ops: &[UpdateOp],
     dry_run: bool,
-    recursive: bool,
-    verbose: bool,
+    _recursive: bool,
+    _verbose: bool,
 ) -> Result<()> {
     if where_strs.is_empty() {
         return Err(VaultdbError::SafetyRefused {
@@ -76,82 +75,94 @@ pub fn run_update(
         .into());
     }
 
-    let folder_path = vault.resolve_folder(folder)?;
-    let where_clauses: Vec<WhereClause> = where_strs
+    // Combine all --where conditions with AND.
+    let exprs: Vec<Expr> = where_strs
         .iter()
-        .map(|s| WhereClause::parse(s).context(format!("parsing where expression: {}", s)))
+        .map(|s| Expr::parse(s).context(format!("parsing where expression: {}", s)))
         .collect::<Result<Vec<_>>>()?;
+    let filter = match exprs.len() {
+        1 => exprs.into_iter().next().unwrap(),
+        _ => Expr::And(exprs),
+    };
 
-    let records = vault.load_records_with_content(&folder_path, recursive, verbose)?.records;
+    let mut builder = UpdateBuilder::new(folder, filter);
+    for op in ops {
+        builder = match op {
+            UpdateOp::Set { field, value } => builder.set(field, parse_set_value(value)),
+            UpdateOp::Unset { field } => builder.unset(field),
+            UpdateOp::AddTag { tag } => builder.add_tag(tag),
+            UpdateOp::RemoveTag { tag } => builder.remove_tag(tag),
+        };
+    }
 
-    let matching: Vec<_> = records
-        .into_iter()
-        .filter(|r| matches_all(&where_clauses, r, &vault.root))
-        .collect();
+    let report = if dry_run {
+        builder.plan(vault)?
+    } else {
+        builder.execute(vault)?
+    };
 
-    if matching.is_empty() {
+    print_report(&report, &vault.root, dry_run, "modified");
+    Ok(())
+}
+
+/// Best-effort parse of a CLI `--set` value into a `Value`. Tries integer, then
+/// float, then falls back to a string so the existing CLI's behaviour
+/// (typed values when they look numeric) is preserved.
+fn parse_set_value(s: &str) -> Value {
+    if let Ok(i) = s.parse::<i64>() {
+        return Value::Integer(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Value::Float(f);
+    }
+    Value::String(s.to_string())
+}
+
+/// Format a MutationReport with the existing CLI's colored output style.
+pub(crate) fn print_report(
+    report: &MutationReport,
+    vault_root: &std::path::Path,
+    dry_run: bool,
+    verb_past: &str,
+) {
+    if report.changes.is_empty() && report.errors.is_empty() {
         println!("No matching records.");
-        return Ok(());
+        return;
     }
 
-    let mut results: Vec<WriteResult> = Vec::new();
-
-    for record in &matching {
-        let mut content = record.raw_content.as_ref().unwrap().clone();
-        let mut changes = Vec::new();
-
-        for op in ops {
-            let (new_content, change) = match op {
-                UpdateOp::Set { field, value } => writer::set_field(&content, field, value)
-                    .context(format!("setting {} in {}", field, record.virtual_name()))?,
-                UpdateOp::Unset { field } => writer::unset_field(&content, field)
-                    .context(format!("unsetting {} in {}", field, record.virtual_name()))?,
-                UpdateOp::AddTag { tag } => writer::add_tag(&content, tag).context(format!(
-                    "adding tag {} in {}",
-                    tag,
-                    record.virtual_name()
-                ))?,
-                UpdateOp::RemoveTag { tag } => writer::remove_tag(&content, tag)
-                    .context(format!("removing tag {} in {}", tag, record.virtual_name()))?,
-            };
-            content = new_content;
-            changes.push(change);
-        }
-
-        results.push(WriteResult {
-            path: record.path.clone(),
-            original_content: record.raw_content.as_ref().unwrap().clone(),
-            modified_content: content,
-            changes,
-        });
-    }
-
-    // Display preview
-    for result in &results {
-        let rel_path = result
+    for change in &report.changes {
+        let rel_path = change
             .path
-            .strip_prefix(&vault.root)
-            .unwrap_or(&result.path);
+            .strip_prefix(vault_root)
+            .unwrap_or(&change.path);
         println!("{}", rel_path.display().to_string().bold());
-        for change in &result.changes {
-            println!("  {}", change);
+        for line in change.description.split("; ") {
+            if !line.is_empty() {
+                println!("  {}", line);
+            }
         }
+    }
+
+    for err in &report.errors {
+        let rel_path = err.path.strip_prefix(vault_root).unwrap_or(&err.path);
+        eprintln!(
+            "{} {}: {}",
+            "error:".red(),
+            rel_path.display(),
+            err.message
+        );
     }
 
     if dry_run {
         println!(
-            "\n{} (dry-run: no files modified)",
-            format!("{} file(s) would be modified", results.len()).yellow()
+            "\n{} (dry-run: no files {})",
+            format!("{} file(s) would be {}", report.changes.len(), verb_past).yellow(),
+            verb_past
         );
     } else {
-        for result in &results {
-            writer::apply(result)?;
-        }
         println!(
             "\n{}",
-            format!("{} file(s) modified", results.len()).green()
+            format!("{} file(s) {}", report.changes.len(), verb_past).green()
         );
     }
-
-    Ok(())
 }
