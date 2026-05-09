@@ -141,11 +141,11 @@ fn decode_percent_encoding(input: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                    continue;
-                }
+            if hex.len() == 2
+                && let Ok(byte) = u8::from_str_radix(&hex, 16)
+            {
+                result.push(byte as char);
+                continue;
             }
             // Failed to parse — keep the original
             result.push('%');
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn field_value_numeric_coercion() {
         assert_eq!(Value::Integer(42).as_float(), Some(42.0));
-        assert_eq!(Value::Float(3.14).as_integer(), Some(3));
+        assert_eq!(Value::Float(3.5).as_integer(), Some(3));
         assert_eq!(Value::String("7".into()).as_integer(), Some(7));
         assert_eq!(Value::String("not a number".into()).as_integer(), None);
     }

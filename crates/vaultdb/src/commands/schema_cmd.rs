@@ -97,11 +97,9 @@ pub fn run_validate(vault: &Vault, folder: &str, recursive: bool, verbose: bool)
         let filtered: Vec<_> = records
             .iter()
             .filter(|r| {
-                combined_filter
-                    .as_ref()
-                    .map_or(true, |expr| {
-                        vaultdb_core::filter::evaluate_expr(expr, r, &vault.root, None)
-                    })
+                combined_filter.as_ref().is_none_or(|expr| {
+                    vaultdb_core::filter::evaluate_expr(expr, r, &vault.root, None)
+                })
             })
             .collect();
 

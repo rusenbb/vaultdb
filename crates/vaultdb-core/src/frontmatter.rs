@@ -13,12 +13,7 @@ use crate::record::{Value, Record};
 /// the file has no valid frontmatter delimiters.
 pub fn extract_frontmatter(content: &str) -> Option<(&str, usize)> {
     // Must start with "---" followed by a newline
-    let content = if content.starts_with("\u{feff}") {
-        // Skip BOM if present
-        &content[3..]
-    } else {
-        content
-    };
+    let content = content.strip_prefix("\u{feff}").unwrap_or(content);
 
     if !content.starts_with("---") {
         return None;

@@ -69,10 +69,10 @@ pub fn run_create(
         println!("\n{}", content);
     } else {
         // Create parent directory if needed
-        if let Some(parent) = dest.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = dest.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&dest, &content)?;
         println!("{}", format!("created: {}", rel_dest.display()).green());

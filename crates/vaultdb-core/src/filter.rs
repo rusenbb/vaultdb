@@ -122,15 +122,14 @@ impl WhereExpr {
                 };
 
                 // Validate regex at parse time
-                if matches!(op, CompareOp::Matches) {
-                    if let Some(ref v) = value {
-                        if Regex::new(v).is_err() {
-                            return Err(VaultdbError::RegexError {
-                                pattern: v.clone(),
-                                reason: "invalid regex syntax".into(),
-                            });
-                        }
-                    }
+                if matches!(op, CompareOp::Matches)
+                    && let Some(ref v) = value
+                    && Regex::new(v).is_err()
+                {
+                    return Err(VaultdbError::RegexError {
+                        pattern: v.clone(),
+                        reason: "invalid regex syntax".into(),
+                    });
                 }
 
                 return Ok(WhereExpr {

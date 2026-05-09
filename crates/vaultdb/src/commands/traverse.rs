@@ -10,6 +10,7 @@ use vaultdb_core::vault::Vault;
 use vaultdb_core::{Direction, Expr, LinkGraph};
 
 /// Run the `traverse` command — BFS from a starting note.
+#[allow(clippy::too_many_arguments)]
 pub fn run_traverse(
     vault: &Vault,
     name: &str,
@@ -109,19 +110,19 @@ pub fn run_traverse(
 
             // Extra fields
             let mut extra = String::new();
-            if !select_fields.is_empty() {
-                if let Some(record) = record_map.get(*note_name) {
-                    let parts: Vec<String> = select_fields
-                        .iter()
-                        .filter_map(|f| {
-                            record
-                                .get_with_links(f, &vault.root, Some(&graph))
-                                .map(|v| format!("{}={}", f, v.display_value()))
-                        })
-                        .collect();
-                    if !parts.is_empty() {
-                        extra = format!("  {}", parts.join(", ").dimmed());
-                    }
+            if !select_fields.is_empty()
+                && let Some(record) = record_map.get(*note_name)
+            {
+                let parts: Vec<String> = select_fields
+                    .iter()
+                    .filter_map(|f| {
+                        record
+                            .get_with_links(f, &vault.root, Some(&graph))
+                            .map(|v| format!("{}={}", f, v.display_value()))
+                    })
+                    .collect();
+                if !parts.is_empty() {
+                    extra = format!("  {}", parts.join(", ").dimmed());
                 }
             }
 

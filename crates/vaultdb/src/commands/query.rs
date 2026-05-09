@@ -86,6 +86,7 @@ fn needs_graph(
 }
 
 /// Run the `query` command.
+#[allow(clippy::too_many_arguments)]
 pub fn run_query(
     vault: &Vault,
     folder: &str,

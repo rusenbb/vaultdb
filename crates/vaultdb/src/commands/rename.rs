@@ -41,9 +41,13 @@ pub fn run_rename(
     let plan_report = RenameBuilder::new(folder, old_name, new_name).plan(vault)?;
 
     if !plan_report.errors.is_empty() {
-        for err in &plan_report.errors {
-            anyhow::bail!("{}", err.message);
-        }
+        let joined = plan_report
+            .errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!("{}", joined);
     }
 
     println!("{} -> {}", old_name.bold(), new_name.bold());

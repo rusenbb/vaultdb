@@ -97,8 +97,7 @@ fn split_frontmatter(content: &str) -> Result<(Vec<&str>, &str)> {
 /// Returns the prefix string (e.g., "  - " or "- ").
 fn detect_list_indent(fm_lines: &[&str], key_line_idx: usize) -> String {
     // Look at the line after the key line
-    for i in (key_line_idx + 1)..fm_lines.len() {
-        let line = fm_lines[i];
+    for line in fm_lines.iter().skip(key_line_idx + 1) {
         let trimmed = line.trim();
 
         // Stop if we hit another top-level key or delimiter
@@ -156,8 +155,7 @@ fn field_extent(fm_lines: &[&str], key_line_idx: usize) -> usize {
     }
 
     let mut extent = 1;
-    for i in (key_line_idx + 1)..fm_lines.len() {
-        let line = fm_lines[i];
+    for line in fm_lines.iter().skip(key_line_idx + 1) {
         let trimmed = line.trim();
 
         // Stop at closing delimiter
@@ -431,15 +429,16 @@ pub fn remove_tag(content: &str, tag: &str) -> Result<(String, ChangeDescription
     let extent = field_extent(&fm_lines, key_idx);
 
     // Find the tag line within the tags section
-    let mut tag_line_idx = None;
-    for i in (key_idx + 1)..(key_idx + extent) {
-        let trimmed = fm_lines[i].trim();
-        let tag_value = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-        if tag_value == tag {
-            tag_line_idx = Some(i);
-            break;
-        }
-    }
+    let tag_line_idx = fm_lines
+        .iter()
+        .enumerate()
+        .skip(key_idx + 1)
+        .take(extent.saturating_sub(1))
+        .find_map(|(i, line)| {
+            let trimmed = line.trim();
+            let tag_value = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            (tag_value == tag).then_some(i)
+        });
 
     let tag_line_idx = tag_line_idx.ok_or_else(|| VaultdbError::InvalidFrontmatter {
         file: String::new(),

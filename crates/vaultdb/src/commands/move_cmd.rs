@@ -42,9 +42,13 @@ pub fn run_move(
     // If the plan reported any conflicts, abort early (mirrors the existing
     // CLI's fail-fast behaviour for filename conflicts at the destination).
     if !plan_report.errors.is_empty() {
-        for err in &plan_report.errors {
-            anyhow::bail!("{}", err.message);
-        }
+        let joined = plan_report
+            .errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!("{}", joined);
     }
 
     for change in &plan_report.changes {
