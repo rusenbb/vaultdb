@@ -212,11 +212,19 @@ impl Vault {
     /// `load_records_with_content` if you need the body text).
     pub fn query(&self, q: &crate::query::Query) -> Result<Vec<Record>> {
         let folder_path = self.resolve_folder(&q.folder)?;
-        let load = self.load_records(&folder_path, q.recursive, false)?;
+
+        // Determine if the filter references the link graph.
+        let needs_links = q.filter.as_ref().map_or(false, expr_uses_links);
+
+        // Load records with content if links are needed for extraction
+        let load = if needs_links {
+            self.load_records_with_content(&folder_path, q.recursive, false)?
+        } else {
+            self.load_records(&folder_path, q.recursive, false)?
+        };
         let mut records = load.records;
 
         // Build a LinkIndex if the filter references the link graph.
-        let needs_links = q.filter.as_ref().map_or(false, expr_uses_links);
         let link_index = if needs_links {
             Some(crate::links::LinkIndex::build(&records))
         } else {
@@ -665,12 +673,55 @@ mod tests {
         // All 3 records are returned (no_fm.md has _name), but after projection
         // each record's frontmatter fields should only contain "status".
         assert!(!results.is_empty());
+        let mut found_record_with_status = false;
         for r in &results {
+            // Every record should have at most "status" in concrete fields
             assert!(
                 r.fields.keys().all(|k| k == "status"),
                 "expected only 'status' in fields, got {:?}",
                 r.fields.keys().collect::<Vec<_>>()
             );
+            if r.fields.contains_key("status") {
+                found_record_with_status = true;
+            }
         }
+        // Some test record must actually have had "status" — otherwise we're testing nothing
+        assert!(
+            found_record_with_status,
+            "expected at least one record to retain 'status' after projection"
+        );
+    }
+
+    #[test]
+    fn query_links_to_target() {
+        use crate::query::{Expr, LinkPredicate, Query};
+        use std::fs;
+
+        let dir = create_test_vault();
+        // Add a record that links to test1
+        fs::write(
+            dir.path().join("notes/linker.md"),
+            "---\ntags:\n  - linker\n---\nLinks to [[test1]]\n",
+        )
+        .unwrap();
+
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::LinksTo(LinkPredicate::Target("test1".into()))),
+            select: None,
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+
+        let results = vault.query(&q).unwrap();
+        // Only `linker` links to test1
+        let names: Vec<String> = results.iter().map(|r| r.virtual_name()).collect();
+        assert!(
+            names.contains(&"linker".to_string()),
+            "expected linker, got {:?}",
+            names
+        );
     }
 }
