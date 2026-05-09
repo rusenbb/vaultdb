@@ -7,7 +7,7 @@ use crate::cli::LinkDirection;
 use vaultdb_core::filter::{WhereClause, matches_all_with_links};
 use vaultdb_core::links::{LinkIndex, TraverseDirection};
 use vaultdb_core::record::Record;
-use crate::vault::Vault;
+use vaultdb_core::vault::Vault;
 
 /// Run the `traverse` command — BFS from a starting note.
 pub fn run_traverse(

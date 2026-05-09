@@ -3,8 +3,8 @@ use colored::Colorize;
 
 use vaultdb_core::error::VaultdbError;
 use vaultdb_core::filter::{WhereClause, matches_all};
-use crate::vault::Vault;
-use crate::writer::{self, WriteResult};
+use vaultdb_core::vault::Vault;
+use vaultdb_core::writer::{self, WriteResult};
 
 pub enum UpdateOp {
     Set { field: String, value: String },

@@ -4,7 +4,7 @@ use colored::Colorize;
 use vaultdb_core::error::VaultdbError;
 use vaultdb_core::filter::{WhereClause, matches_all};
 use vaultdb_core::links::LinkIndex;
-use crate::vault::Vault;
+use vaultdb_core::vault::Vault;
 
 /// Run the `delete` command.
 /// By default, moves files to `.trash/` in the vault root.

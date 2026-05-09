@@ -6,3 +6,5 @@ pub mod frontmatter;
 pub mod links;
 pub mod record;
 pub mod schema;
+pub mod vault;
+pub mod writer;

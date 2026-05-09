@@ -3,8 +3,6 @@
 mod cli;
 mod commands;
 mod output;
-mod vault;
-mod writer;
 
 use std::process;
 
@@ -12,7 +10,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use cli::{Cli, Command};
-use vault::Vault;
+use vaultdb_core::vault::Vault;
 
 fn main() {
     if let Err(e) = run() {

@@ -8,7 +8,7 @@ use vaultdb_core::filter::{WhereClause, WhereExpr, matches_all_with_links, match
 use vaultdb_core::links::LinkIndex;
 use crate::output;
 use vaultdb_core::record::{FieldValue, Record};
-use crate::vault::Vault;
+use vaultdb_core::vault::Vault;
 
 const GRAPH_FIELDS: &[&str] = &["_links", "_link_count", "_backlinks", "_backlink_count"];
 

@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use vaultdb_core::frontmatter;
-use crate::vault::Vault;
-use crate::writer;
+use vaultdb_core::vault::Vault;
+use vaultdb_core::writer;
 
 /// Run the `create` command — create a new note, optionally from a template.
 pub fn run_create(

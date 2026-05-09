@@ -1,4 +1,4 @@
-use vaultdb_core::error::{Result, VaultdbError};
+use crate::error::{Result, VaultdbError};
 
 /// Describes a single change made to a file.
 #[derive(Debug)]

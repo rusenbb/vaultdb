@@ -3,7 +3,7 @@ use colored::Colorize;
 
 use vaultdb_core::filter::{WhereClause, matches_all};
 use vaultdb_core::schema::{self, VaultSchema};
-use crate::vault::Vault;
+use vaultdb_core::vault::Vault;
 
 const SCHEMA_FILENAME: &str = "vaultdb-schema.yaml";
 

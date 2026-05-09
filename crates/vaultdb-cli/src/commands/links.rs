@@ -3,7 +3,7 @@ use colored::Colorize;
 
 use crate::cli::LinkDirection;
 use vaultdb_core::links::LinkIndex;
-use crate::vault::Vault;
+use vaultdb_core::vault::Vault;
 
 /// Run the `links` command — show outgoing/incoming links for a note.
 pub fn run_links(

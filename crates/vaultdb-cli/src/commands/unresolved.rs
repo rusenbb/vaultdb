@@ -4,7 +4,7 @@ use anyhow::Result;
 use colored::Colorize;
 
 use vaultdb_core::links::{LinkIndex, TraverseDirection};
-use crate::vault::Vault;
+use vaultdb_core::vault::Vault;
 
 /// Run the `unresolved` command — find all wiki-links pointing to non-existent files.
 /// Optionally scoped to notes within N hops of a starting note.

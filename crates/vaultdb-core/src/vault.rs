@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use vaultdb_core::error::{Result, VaultdbError};
-use vaultdb_core::frontmatter;
-use vaultdb_core::record::Record;
+use crate::error::{Result, VaultdbError};
+use crate::frontmatter;
+use crate::record::Record;
 
 /// Represents a discovered Obsidian vault.
 pub struct Vault {

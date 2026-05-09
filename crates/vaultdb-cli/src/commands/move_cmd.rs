@@ -3,7 +3,7 @@ use colored::Colorize;
 
 use vaultdb_core::error::VaultdbError;
 use vaultdb_core::filter::{WhereClause, matches_all};
-use crate::vault::Vault;
+use vaultdb_core::vault::Vault;
 
 /// Run the `move` command.
 pub fn run_move(
