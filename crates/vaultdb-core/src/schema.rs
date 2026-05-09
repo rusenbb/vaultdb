@@ -51,6 +51,11 @@ pub fn load_schema(path: &Path) -> Result<VaultSchema> {
     Ok(schema)
 }
 
+/// Serialize a schema to YAML string.
+pub fn schema_to_yaml(schema: &VaultSchema) -> Result<String> {
+    Ok(serde_yaml::to_string(schema)?)
+}
+
 /// A single validation violation.
 #[derive(Debug)]
 pub struct Violation {

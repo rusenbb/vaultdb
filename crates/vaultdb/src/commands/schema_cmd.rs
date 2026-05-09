@@ -145,7 +145,7 @@ pub fn run_init(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> 
         collections: std::collections::BTreeMap::from([(folder.to_string(), collection)]),
     };
 
-    let yaml = serde_yaml::to_string(&schema)?;
+    let yaml = schema::schema_to_yaml(&schema)?;
     println!("{}", yaml);
 
     let schema_path = vault.root.join(SCHEMA_FILENAME);
