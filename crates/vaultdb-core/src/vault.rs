@@ -61,8 +61,11 @@ impl Vault {
                 .follow_links(false)
                 .into_iter()
                 .filter_entry(|e| {
-                    // Skip hidden directories
-                    !e.file_name().to_str().is_some_and(|s| s.starts_with('.'))
+                    // Skip hidden directories — but allow the root entry
+                    // itself, even when it lives under a hidden parent (e.g.
+                    // a TempDir whose name starts with `.tmp`).
+                    e.depth() == 0
+                        || !e.file_name().to_str().is_some_and(|s| s.starts_with('.'))
                 })
             {
                 let entry = entry.map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -203,6 +206,42 @@ impl Vault {
             })),
             Err(e) => Err(e),
         }
+    }
+
+    /// Build a link graph over the given scope.
+    ///
+    /// `GraphScope::All` walks the whole vault recursively. `Folder(name)`
+    /// scopes to one folder. `Where(expr)` first walks the whole vault, builds
+    /// a temporary graph for predicate evaluation (so link predicates work),
+    /// filters records, and rebuilds the graph from the filtered subset.
+    ///
+    /// Records are loaded with raw content so wikilinks can be extracted.
+    pub fn link_graph(
+        &self,
+        scope: crate::links::GraphScope,
+    ) -> Result<crate::links::LinkGraph> {
+        use crate::links::{GraphScope, LinkIndex};
+        let records: Vec<Record> = match scope {
+            GraphScope::All => self
+                .load_records_with_content(&self.root, true, false)?
+                .records,
+            GraphScope::Folder(folder) => {
+                let path = self.resolve_folder(&folder)?;
+                self.load_records_with_content(&path, true, false)?.records
+            }
+            GraphScope::Where(expr) => {
+                let all = self
+                    .load_records_with_content(&self.root, true, false)?
+                    .records;
+                let idx = LinkIndex::build_with_root(&all, Some(&self.root));
+                all.into_iter()
+                    .filter(|r| {
+                        crate::filter::evaluate_expr(&expr, r, &self.root, Some(&idx))
+                    })
+                    .collect()
+            }
+        };
+        Ok(LinkIndex::build_with_root(&records, Some(&self.root)))
     }
 
     /// Run a structured query against the vault. Returns the matching records,
@@ -583,5 +622,42 @@ mod tests {
             "expected linker, got {:?}",
             names
         );
+    }
+
+    #[test]
+    fn vault_link_graph_all_walks_full_vault() {
+        use crate::links::GraphScope;
+        use std::fs;
+        let dir = create_test_vault();
+        // Add a file with an outgoing wikilink so the graph has at least one edge
+        fs::write(
+            dir.path().join("notes/with_link.md"),
+            "---\nstatus: active\n---\nLinks to [[test1]]\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let graph = vault.link_graph(GraphScope::All).unwrap();
+        assert!(
+            graph
+                .incoming_links("test1")
+                .iter()
+                .any(|s| *s == "with_link"),
+            "expected with_link in test1's backlinks"
+        );
+    }
+
+    #[test]
+    fn vault_link_graph_folder_scopes_correctly() {
+        use crate::links::GraphScope;
+        use std::fs;
+        let dir = create_test_vault();
+        fs::write(
+            dir.path().join("notes/with_link.md"),
+            "---\nstatus: active\n---\nLinks to [[test1]]\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let graph = vault.link_graph(GraphScope::Folder("notes".into())).unwrap();
+        assert!(graph.outgoing_links("with_link").iter().any(|s| *s == "test1"));
     }
 }

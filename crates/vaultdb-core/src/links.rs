@@ -3,13 +3,50 @@ use std::collections::{BTreeMap, BTreeSet};
 use regex::Regex;
 use std::sync::LazyLock;
 
-use crate::record::{Value, Record};
+use crate::record::{Record, Value};
 
 #[derive(Debug, Clone)]
 pub enum TraverseDirection {
     Outgoing,
     Incoming,
     Both,
+}
+
+/// Public direction enum for the graph traversal API.
+///
+/// Mirrors `TraverseDirection`; the existing internal type stays for now to
+/// avoid touching every `commands/*.rs` call site at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Direction {
+    Outgoing,
+    Incoming,
+    Both,
+}
+
+impl From<Direction> for TraverseDirection {
+    fn from(d: Direction) -> Self {
+        match d {
+            Direction::Outgoing => TraverseDirection::Outgoing,
+            Direction::Incoming => TraverseDirection::Incoming,
+            Direction::Both => TraverseDirection::Both,
+        }
+    }
+}
+
+/// What subset of the vault to build the link graph over.
+#[derive(Debug, Clone)]
+pub enum GraphScope {
+    All,
+    Folder(String),
+    Where(crate::query::Expr),
+}
+
+/// A wikilink whose target file does not exist among the records the graph
+/// was built from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnresolvedLink {
+    pub source: String,
+    pub target: String,
 }
 
 static WIKI_LINK_RE: LazyLock<Regex> =
@@ -52,6 +89,11 @@ pub fn record_links(record: &Record) -> BTreeSet<String> {
         None => BTreeSet::new(),
     }
 }
+
+/// Public canonical name for the link index. The `LinkIndex` name is kept as
+/// the type definition for now to avoid a sweeping rename across CLI files;
+/// `LinkGraph` is the public-API alias consumers should use going forward.
+pub type LinkGraph = LinkIndex;
 
 /// A backlink index: maps note name -> set of notes that link to it.
 /// Handles duplicate filenames by using path-based resolution.
@@ -226,6 +268,35 @@ impl LinkIndex {
             .is_some_and(|links| links.contains(from))
     }
 
+    /// All wikilinks pointing to non-existent records, returned as
+    /// `(source, target)` pairs. Targets are normalised via the same
+    /// folder-stripping rule used during graph construction.
+    pub fn unresolved(&self) -> Vec<UnresolvedLink> {
+        let mut out = Vec::new();
+        for (source, targets) in &self.outgoing {
+            for target in targets {
+                let resolved = self.resolve_link_target(target);
+                if !self.name_to_paths.contains_key(&resolved) {
+                    out.push(UnresolvedLink {
+                        source: source.clone(),
+                        target: target.clone(),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// BFS traversal returning just the reachable note names (without depth).
+    /// The starting note itself is NOT included.
+    pub fn traverse_from(&self, start: &str, depth: usize, direction: Direction) -> Vec<String> {
+        self.traverse(start, depth, direction.into())
+            .into_iter()
+            .filter(|(name, d)| name != start && *d > 0)
+            .map(|(name, _)| name)
+            .collect()
+    }
+
     /// Get link data as Values for virtual fields on a record.
     pub fn virtual_fields(&self, name: &str) -> Vec<(&'static str, Value)> {
         let out_links = self.outgoing_links(name);
@@ -389,5 +460,72 @@ mod tests {
             .find(|(k, _)| *k == "_backlink_count")
             .unwrap();
         assert_eq!(backlink_count.1, Value::Integer(1));
+    }
+
+    #[test]
+    fn unresolved_returns_dangling_targets() {
+        let records = vec![Record {
+            path: PathBuf::from("/vault/a.md"),
+            fields: BTreeMap::new(),
+            raw_content: Some("Links to [[ghost]] and [[b]].".into()),
+        }, Record {
+            path: PathBuf::from("/vault/b.md"),
+            fields: BTreeMap::new(),
+            raw_content: Some("".into()),
+        }];
+
+        let index = LinkIndex::build(&records);
+        let unresolved = index.unresolved();
+        assert_eq!(unresolved.len(), 1, "expected one dangling link, got {:?}", unresolved);
+        assert_eq!(unresolved[0].source, "a");
+        assert_eq!(unresolved[0].target, "ghost");
+    }
+
+    #[test]
+    fn unresolved_empty_when_all_resolved() {
+        let records = vec![Record {
+            path: PathBuf::from("/vault/a.md"),
+            fields: BTreeMap::new(),
+            raw_content: Some("Links to [[b]].".into()),
+        }, Record {
+            path: PathBuf::from("/vault/b.md"),
+            fields: BTreeMap::new(),
+            raw_content: Some("".into()),
+        }];
+
+        let index = LinkIndex::build(&records);
+        assert!(index.unresolved().is_empty());
+    }
+
+    #[test]
+    fn traverse_from_outgoing_skips_self() {
+        let mk = |name: &str, content: &str| Record {
+            path: PathBuf::from(format!("/vault/{}.md", name)),
+            fields: BTreeMap::new(),
+            raw_content: Some(content.into()),
+        };
+        let records = vec![mk("a", "[[b]]"), mk("b", "[[c]]"), mk("c", "")];
+        let index = LinkIndex::build(&records);
+        let names = index.traverse_from("a", 2, Direction::Outgoing);
+        assert!(names.contains(&"b".to_string()));
+        assert!(names.contains(&"c".to_string()));
+        assert!(
+            !names.contains(&"a".to_string()),
+            "starting node should not be in the result"
+        );
+    }
+
+    #[test]
+    fn traverse_from_respects_depth() {
+        let mk = |name: &str, content: &str| Record {
+            path: PathBuf::from(format!("/vault/{}.md", name)),
+            fields: BTreeMap::new(),
+            raw_content: Some(content.into()),
+        };
+        let records = vec![mk("a", "[[b]]"), mk("b", "[[c]]"), mk("c", "[[d]]"), mk("d", "")];
+        let index = LinkIndex::build(&records);
+        let names = index.traverse_from("a", 1, Direction::Outgoing);
+        assert!(names.contains(&"b".to_string()));
+        assert!(!names.contains(&"c".to_string()), "depth=1 should not reach c");
     }
 }
