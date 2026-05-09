@@ -749,7 +749,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
  "vaultdb-core",
 ]
 
