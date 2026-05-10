@@ -10,8 +10,6 @@ use vaultdb_core::record::{Record, Value};
 use vaultdb_core::vault::Vault;
 use vaultdb_core::{Expr, LinkPredicate};
 
-const GRAPH_FIELDS: &[&str] = &["_links", "_link_count", "_backlinks", "_backlink_count"];
-
 /// Relational filter parameters.
 pub struct RelationalFilters {
     pub links_to: Vec<String>,
@@ -59,10 +57,12 @@ fn build_filter(where_strs: &[String], relational: &RelationalFilters) -> Result
     })
 }
 
-/// True if any flag string references a graph virtual field, OR if the parsed
-/// `Expr` (when present) walks the link graph.
+/// True if the query needs a `LinkGraph` to be built. The library's
+/// `expr_uses_links` covers the filter (it knows about both `LinksTo`/
+/// `LinkedFrom` variants and graph-virtual-field predicates); this layer
+/// adds the CLI-only concerns: select / sort flags can reference graph
+/// virtual fields too, and `--links-to` / `--linked-from` always need one.
 fn needs_graph(
-    where_strs: &[String],
     select: &Option<String>,
     sort: Option<&str>,
     relational: &RelationalFilters,
@@ -74,15 +74,10 @@ fn needs_graph(
     if filter.is_some_and(vaultdb_core::filter::expr_uses_links) {
         return true;
     }
-    let all_strs: Vec<&str> = where_strs
+    let projection: Vec<&str> = select.as_deref().into_iter().chain(sort).collect();
+    vaultdb_core::filter::GRAPH_VIRTUAL_FIELDS
         .iter()
-        .map(|s| s.as_str())
-        .chain(select.as_deref())
-        .chain(sort)
-        .collect();
-    GRAPH_FIELDS
-        .iter()
-        .any(|gf| all_strs.iter().any(|s| s.contains(gf)))
+        .any(|gf| projection.iter().any(|s| s.contains(gf)))
 }
 
 /// Run the `query` command.
@@ -102,7 +97,7 @@ pub fn run_query(
 ) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
     let filter = build_filter(where_strs, relational)?;
-    let use_graph = needs_graph(where_strs, select, sort_field, relational, filter.as_ref());
+    let use_graph = needs_graph(select, sort_field, relational, filter.as_ref());
 
     // Load records — with content if we need graph fields
     let records = if use_graph {
@@ -189,7 +184,7 @@ pub fn run_count(
         linked_from_where: vec![],
     };
     let filter = build_filter(where_strs, &no_relational)?;
-    let use_graph = needs_graph(where_strs, &None, None, &no_relational, filter.as_ref());
+    let use_graph = needs_graph(&None, None, &no_relational, filter.as_ref());
 
     let records = if use_graph {
         vault

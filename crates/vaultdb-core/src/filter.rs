@@ -539,21 +539,78 @@ mod tests {
             Ordering::Equal
         );
     }
+
+    #[test]
+    fn expr_uses_links_detects_graph_virtual_field_predicates() {
+        // Bug repro: `_link_count > 0` predicates didn't trigger the
+        // link-graph build path because expr_uses_links only inspected
+        // LinksTo/LinkedFrom variants. Vault::query would skip the graph
+        // build, and the predicate would silently return false for every
+        // record (record.get_with_links of a graph field returns None
+        // when no link_index is provided).
+        use crate::query::Expr as E;
+
+        let e = E::parse("_link_count > 0").unwrap();
+        assert!(
+            expr_uses_links(&e),
+            "_link_count > 0 must trigger link-graph build"
+        );
+
+        let e2 = E::parse("_backlink_count = 5").unwrap();
+        assert!(expr_uses_links(&e2));
+
+        let e3 = E::parse("_backlinks contains React").unwrap();
+        assert!(expr_uses_links(&e3));
+
+        // Non-graph predicates still must NOT trigger the build (otherwise
+        // every query pays the link-graph cost).
+        let e4 = E::parse("status = active").unwrap();
+        assert!(!expr_uses_links(&e4));
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
 // Query evaluator helpers (public interface for evaluating Expr/Predicate)
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Returns true if any node of `expr` references the link graph.
+/// Graph virtual fields whose evaluation requires a `LinkGraph`. Kept as a
+/// const so consumers (and tests) can rely on the canonical list.
+pub const GRAPH_VIRTUAL_FIELDS: &[&str] =
+    &["_links", "_link_count", "_backlinks", "_backlink_count"];
+
+/// Returns true if any node of `expr` references the link graph — either
+/// via a [`crate::query::Expr::LinksTo`] / [`crate::query::Expr::LinkedFrom`]
+/// variant, or via a predicate whose field is one of the graph virtual
+/// fields ([`GRAPH_VIRTUAL_FIELDS`]).
+///
+/// `Vault::query` and the mutation builders use this to decide whether to
+/// load raw_content and build a `LinkGraph` before evaluating the filter.
+/// Missing the predicate-field case here is what made `--where "_link_count
+/// > 0"` silently return zero results before this fix landed.
 pub fn expr_uses_links(expr: &crate::query::Expr) -> bool {
     use crate::query::Expr;
     match expr {
         Expr::LinksTo(_) | Expr::LinkedFrom(_) => true,
-        Expr::Predicate(_) => false,
+        Expr::Predicate(p) => predicate_uses_links(p),
         Expr::And(es) | Expr::Or(es) => es.iter().any(expr_uses_links),
         Expr::Not(e) => expr_uses_links(e),
     }
+}
+
+/// Returns true if a leaf predicate references a graph virtual field.
+fn predicate_uses_links(p: &crate::query::Predicate) -> bool {
+    use crate::query::Predicate;
+    let field = match p {
+        Predicate::Equals { field, .. }
+        | Predicate::Contains { field, .. }
+        | Predicate::Compare { field, .. }
+        | Predicate::Matches { field, .. }
+        | Predicate::StartsWith { field, .. }
+        | Predicate::EndsWith { field, .. }
+        | Predicate::Exists { field }
+        | Predicate::Missing { field } => field,
+    };
+    GRAPH_VIRTUAL_FIELDS.contains(&field.as_str())
 }
 
 /// Evaluate an `Expr` against a single record.

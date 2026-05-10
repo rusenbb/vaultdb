@@ -275,13 +275,19 @@ vaultdb schema show 3-Notes
 
 ## Performance
 
-No caching, no indexing — reads files fresh on every command.
+No caching, no indexing — reads files fresh on every command. Numbers below are best-of-3 from `cargo run --release --example bench -- <N>` against synthetic notes (status alternating, ~3 wikilinks each), measured on a Linux laptop:
 
-| Scale | Frontmatter query | Graph query |
-|-------|------------------|-------------|
-| 700 files | 16ms | 17ms |
-| 10K files | ~200ms | ~250ms |
-| 50K files | ~1s | ~1.2s |
+| Scale | Frontmatter query | Graph query (filter touches `_link_count`) | `link_graph(All)` build |
+|-------|------------------|---------------------------------------------|------------------------|
+| 1K notes  | ~5ms   | ~6ms   | ~6ms   |
+| 10K notes | ~55ms  | ~75ms  | ~70ms  |
+| 50K notes | ~285ms | ~420ms | ~370ms |
+
+Reproduce with:
+
+```bash
+cargo run --release -p vaultdb-core --example bench -- 10000
+```
 
 Two-parser architecture: `serde_yaml` for fast reads, line-by-line string manipulation for formatting-preserving writes.
 
