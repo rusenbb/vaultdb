@@ -5,7 +5,9 @@
 //! these find a vault the server still starts; tool calls return a
 //! typed error explaining the resolution failure.
 
+mod params;
 mod server;
+mod tools;
 
 use std::path::PathBuf;
 
