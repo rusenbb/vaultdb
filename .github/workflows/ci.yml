@@ -68,12 +68,14 @@ jobs:
       # lives in publish.yml).
       - name: vaultdb-core
         run: cargo publish --dry-run --allow-dirty -p vaultdb-core
-      # vaultdb-mcp and vaultdb depend on vaultdb-core. Their dry-run
-      # would normally fail because v1.0.0 isn't on crates.io yet —
-      # we use `cargo package` instead which validates the manifest
-      # and produces a tarball without running the dependency-
-      # resolution step that requires the registry.
+      # vaultdb-mcp and vaultdb depend on vaultdb-core via
+      # `path + version`. cargo strips the `path` at package time
+      # (so the published tarball uses the version from crates.io),
+      # which means a verify-compile would need vaultdb-core to
+      # already be on the registry. `--no-verify` skips the
+      # compile and just validates the manifest shape — exactly
+      # what we want from a CI dry-run.
       - name: vaultdb-mcp (package only)
-        run: cargo package --allow-dirty -p vaultdb-mcp
+        run: cargo package --no-verify --allow-dirty -p vaultdb-mcp
       - name: vaultdb CLI (package only)
-        run: cargo package --allow-dirty -p vaultdb
+        run: cargo package --no-verify --allow-dirty -p vaultdb
