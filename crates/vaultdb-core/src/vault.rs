@@ -47,6 +47,23 @@ impl Vault {
         Vault { root }
     }
 
+    /// Replay any pending journals from previously-crashed mutations.
+    ///
+    /// Currently the only mutation that writes a journal is
+    /// [`crate::RenameBuilder::execute`] — a rename that crashed between
+    /// the file rename and finishing every backlink rewrite leaves a
+    /// journal at `<vault>/.vaultdb/rename-journal/`. This method
+    /// replays each pending journal idempotently and returns the count
+    /// of journals processed.
+    ///
+    /// Long-lived consumers (eduport-tauri, etc.) should call this
+    /// at startup. Each mutation also runs replay implicitly under
+    /// the vault lock, so the only behavioural difference is timing:
+    /// explicit recovery surfaces leftover work earlier.
+    pub fn recover(&self) -> Result<usize> {
+        crate::lock::with_lock(&self.root, || crate::journal::replay_all(&self.root))
+    }
+
     /// Resolve a folder argument (relative to vault root) to an absolute path.
     pub fn resolve_folder(&self, folder: &str) -> Result<PathBuf> {
         let path = self.root.join(folder);

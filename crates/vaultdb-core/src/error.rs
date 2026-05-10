@@ -48,6 +48,14 @@ pub enum VaultdbError {
     #[error("operation refused: {reason}")]
     SafetyRefused { reason: String },
 
+    /// Vaultdb's own internal invariant was violated (e.g. a journal file
+    /// failed to round-trip through serde, a lock sentinel couldn't be
+    /// created because of an unexpected filesystem state). These are bugs
+    /// in vaultdb-core or unrecoverable filesystem situations, not user
+    /// errors.
+    #[error("internal error: {0}")]
+    Internal(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

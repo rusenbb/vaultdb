@@ -481,6 +481,14 @@ impl RenameBuilder {
 
     pub fn execute(self, vault: &Vault) -> Result<MutationReport> {
         crate::lock::with_lock(&vault.root, || {
+            // Recover any pending journals from previous crashed renames
+            // before we start a new one. Without this, a stale journal
+            // could be replayed *after* our new rename, producing
+            // surprising results (e.g. backlink rewrites for an old
+            // rename happening on top of a new one). Replay first means
+            // the vault is in a clean known state when we start.
+            crate::journal::replay_all(&vault.root)?;
+
             let folder_path = vault.resolve_folder(&self.folder)?;
             let source = folder_path.join(format!("{}.md", self.from));
             let dest = folder_path.join(format!("{}.md", self.to));
@@ -491,15 +499,29 @@ impl RenameBuilder {
                 return Ok(report);
             }
 
-            let mut errors = Vec::new();
+            // Build and write the journal BEFORE any disk-modifying
+            // step. If the process dies between this point and the
+            // final delete-journal call, the next mutation (or an
+            // explicit `Vault::recover` call) will replay it.
+            let backlinks: Vec<PathBuf> = report
+                .changes
+                .iter()
+                .skip(1) // first change is the rename itself
+                .map(|c| c.path.clone())
+                .collect();
+            let journal = crate::journal::RenameJournal {
+                source: source.clone(),
+                dest: dest.clone(),
+                from_name: self.from.clone(),
+                to_name: self.to.clone(),
+                backlinks,
+            };
+            let journal_path = crate::journal::write(&vault.root, &journal)?;
 
-            // Rename the source file. NOTE: this is NOT yet transactional —
-            // a crash between this rename and the backlink rewrites below
-            // leaves the vault with a renamed file but stale wikilinks.
-            // Phase A item 2 adds a journal so the rewrites can be replayed
-            // on the next startup. For now, the order (rename first, then
-            // rewrites) matches the previous behaviour.
+            // Now do the rename. If this fails, drop the journal — the
+            // vault is unchanged, no recovery work to do.
             if let Err(e) = std::fs::rename(&source, &dest) {
+                crate::journal::delete(&journal_path);
                 return Ok(MutationReport {
                     changes: report.changes,
                     errors: vec![MutationError {
@@ -509,7 +531,10 @@ impl RenameBuilder {
                 });
             }
 
-            // Rewrite incoming wikilinks atomically (tempfile + rename per file).
+            // Rewrite incoming wikilinks atomically (tempfile + rename
+            // per file). Each rewrite is itself idempotent so a partial
+            // run + journal replay reaches the same end state.
+            let mut errors = Vec::new();
             for change in report.changes.iter().skip(1) {
                 let path = &change.path;
                 let content = match std::fs::read_to_string(path) {
@@ -523,12 +548,22 @@ impl RenameBuilder {
                     }
                 };
                 let new_content = rewrite_wikilinks(&content, &self.from, &self.to);
+                if new_content == content {
+                    continue;
+                }
                 if let Err(e) = writer::atomic_write(path, &new_content) {
                     errors.push(MutationError {
                         path: path.clone(),
                         message: format!("write failed: {}", e),
                     });
                 }
+            }
+
+            // All rewrites attempted. If any failed, leave the journal
+            // so the next replay sweep retries them. If everything
+            // succeeded, drop the journal — recovery has nothing to do.
+            if errors.is_empty() {
+                crate::journal::delete(&journal_path);
             }
 
             Ok(MutationReport {
@@ -541,7 +576,7 @@ impl RenameBuilder {
 
 /// Rewrite `[[from]]` (and `[[from|alias]]`, `[[from#section]]`,
 /// `[[from#section|alias]]`) to point at `to`.
-fn rewrite_wikilinks(content: &str, from: &str, to: &str) -> String {
+pub(crate) fn rewrite_wikilinks(content: &str, from: &str, to: &str) -> String {
     content
         .replace(&format!("[[{}]]", from), &format!("[[{}]]", to))
         .replace(&format!("[[{}|", from), &format!("[[{}|", to))
@@ -749,6 +784,133 @@ mod tests {
         // b.md was NOT touched (its status is pending, doesn't match the filter)
         let b_after = fs::read_to_string(dir.path().join("notes/b.md")).unwrap();
         assert!(!b_after.contains("priority"));
+    }
+
+    #[test]
+    fn rename_clean_run_leaves_no_journal_behind() {
+        // Successful rename writes a journal then deletes it. After the
+        // call, the journal directory should be empty (or absent).
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/old.md"),
+            "---\nstatus: x\n---\nBody\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes/source.md"),
+            "---\nstatus: y\n---\nLinks to [[old]].\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        RenameBuilder::new("notes", "old", "new")
+            .execute(&vault)
+            .unwrap();
+
+        let pending = crate::journal::list_pending(dir.path()).unwrap();
+        assert!(
+            pending.is_empty(),
+            "successful rename must not leave journals behind: {:?}",
+            pending
+        );
+    }
+
+    #[test]
+    fn rename_recovers_from_pre_existing_journal() {
+        // Simulate a crashed rename by hand-writing a journal that points
+        // at an unrenamed source file with stale backlinks. Vault::recover
+        // should pick it up and complete the work.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        let source = dir.path().join("notes/Stanford.md");
+        let dest = dir.path().join("notes/Stanford University.md");
+        let backlink = dir.path().join("notes/Application.md");
+        fs::write(&source, "---\nkind: university\n---\nMain note.\n").unwrap();
+        fs::write(
+            &backlink,
+            "---\nkind: application\n---\nApplied to [[Stanford]].\n",
+        )
+        .unwrap();
+
+        // Plant a journal as if a previous rename had crashed mid-flight.
+        let journal = crate::journal::RenameJournal {
+            source: source.clone(),
+            dest: dest.clone(),
+            from_name: "Stanford".into(),
+            to_name: "Stanford University".into(),
+            backlinks: vec![backlink.clone()],
+        };
+        crate::journal::write(dir.path(), &journal).unwrap();
+
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let recovered = vault.recover().unwrap();
+        assert_eq!(recovered, 1, "expected exactly one journal replayed");
+
+        // Source renamed, backlink rewritten, journal gone.
+        assert!(!source.exists());
+        assert!(dest.is_file());
+        let backlink_content = fs::read_to_string(&backlink).unwrap();
+        assert!(backlink_content.contains("[[Stanford University]]"));
+        assert!(!backlink_content.contains("[[Stanford]]"));
+        assert!(crate::journal::list_pending(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rename_replays_pending_journal_before_starting_new_rename() {
+        // A pending journal from a previous crashed rename must be
+        // replayed before the next mutation starts. Otherwise we'd be
+        // operating on a stale view of the vault.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+
+        // Pre-existing files: A.md (will be renamed to B.md by the
+        // pending journal), and C.md (will be renamed to D.md by the
+        // new RenameBuilder call).
+        let a = dir.path().join("notes/A.md");
+        let b = dir.path().join("notes/B.md");
+        let c = dir.path().join("notes/C.md");
+        let d = dir.path().join("notes/D.md");
+        fs::write(&a, "---\n---\nA body.\n").unwrap();
+        fs::write(&c, "---\n---\nC body.\n").unwrap();
+
+        // Plant a pending journal that says "rename A -> B".
+        crate::journal::write(
+            dir.path(),
+            &crate::journal::RenameJournal {
+                source: a.clone(),
+                dest: b.clone(),
+                from_name: "A".into(),
+                to_name: "B".into(),
+                backlinks: vec![],
+            },
+        )
+        .unwrap();
+
+        // Now call execute() on a separate rename C -> D.
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        RenameBuilder::new("notes", "C", "D")
+            .execute(&vault)
+            .unwrap();
+
+        // BOTH renames must have completed: the journal-replay before the
+        // new rename did A -> B, and the new RenameBuilder did C -> D.
+        assert!(!a.exists(), "A.md should be gone (replayed journal)");
+        assert!(b.is_file(), "B.md should exist (replayed journal)");
+        assert!(!c.exists(), "C.md should be gone (new rename)");
+        assert!(d.is_file(), "D.md should exist (new rename)");
+
+        // No leftover journals.
+        assert!(crate::journal::list_pending(dir.path()).unwrap().is_empty());
     }
 
     #[test]

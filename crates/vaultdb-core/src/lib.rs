@@ -49,6 +49,7 @@
 pub mod error;
 pub mod filter;
 pub mod frontmatter;
+pub mod journal;
 pub mod links;
 pub mod lock;
 pub mod mutation;
