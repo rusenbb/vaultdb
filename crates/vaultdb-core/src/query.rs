@@ -116,10 +116,11 @@ impl FromStr for Expr {
     type Err = VaultdbError;
 
     fn from_str(input: &str) -> std::result::Result<Self, Self::Err> {
-        // The where-DSL parser lives in `filter.rs` (alongside the rest of
-        // the evaluator). It produces an `Expr` directly — the
-        // crate-internal `WhereClause` AST is wrapped at the boundary.
-        crate::filter::parse_where_clause(input)
+        // The where-DSL parser lives in `crate::dsl` (pest-driven).
+        // It produces a public `Expr` directly. See `where_dsl.pest`
+        // for the grammar; precedence is SQL-conventional (AND tighter
+        // than OR).
+        crate::dsl::parse(input)
     }
 }
 

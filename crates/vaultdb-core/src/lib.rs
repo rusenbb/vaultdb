@@ -46,6 +46,7 @@
 //! fresh. Stateful concerns (file watchers, full-text indexes, typed schemas)
 //! belong in consumers, not in vaultdb-core.
 
+pub mod dsl;
 pub mod error;
 pub mod filter;
 pub mod frontmatter;

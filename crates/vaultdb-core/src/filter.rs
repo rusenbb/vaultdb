@@ -2,330 +2,13 @@
 //!
 //! Walks `Expr` and `Predicate` trees against a [`Record`] (and an optional
 //! [`crate::links::LinkGraph`] for graph predicates) and returns `bool`.
-//! Also hosts the where-DSL parser and its internal `WhereClause`/`WhereExpr`
-//! types — the parser produces the internal AST and converts to `Expr` at
-//! the public boundary via `WhereClause::to_expr`.
+//!
+//! The where-DSL **parser** lives in [`crate::dsl`] (pest-driven). This
+//! module is now strictly the runtime evaluator.
 
 use std::path::Path;
 
-use regex::Regex;
-
-use crate::error::{Result, VaultdbError};
 use crate::record::Record;
-
-#[derive(Debug, Clone)]
-pub(crate) enum CompareOp {
-    Eq,
-    Neq,
-    Gt,
-    Lt,
-    Gte,
-    Lte,
-    Contains,
-    StartsWith,
-    EndsWith,
-    Exists,
-    Missing,
-    Matches,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct WhereExpr {
-    pub field: String,
-    pub op: CompareOp,
-    pub negated: bool,
-    /// None for Exists/Missing operators.
-    pub value: Option<String>,
-}
-
-/// A where clause is one `--where` argument, which may contain OR-ed expressions.
-/// Multiple `--where` arguments are AND-ed together.
-#[derive(Debug, Clone)]
-pub(crate) struct WhereClause {
-    /// Expressions OR-ed within this clause.
-    pub alternatives: Vec<WhereExpr>,
-}
-
-/// Word-based operators (checked before symbolic ones).
-const WORD_OPS: &[(&str, CompareOp)] = &[
-    (" !contains ", CompareOp::Contains),
-    (" contains ", CompareOp::Contains),
-    (" !startswith ", CompareOp::StartsWith),
-    (" startswith ", CompareOp::StartsWith),
-    (" !endswith ", CompareOp::EndsWith),
-    (" endswith ", CompareOp::EndsWith),
-    (" !matches ", CompareOp::Matches),
-    (" matches ", CompareOp::Matches),
-    (" !exists", CompareOp::Exists),
-    (" exists", CompareOp::Exists),
-    (" !missing", CompareOp::Missing),
-    (" missing", CompareOp::Missing),
-];
-
-/// Symbolic operators (checked in order: longest first to avoid ambiguity).
-const SYMBOL_OPS: &[(&str, CompareOp)] = &[
-    (" >= ", CompareOp::Gte),
-    (" <= ", CompareOp::Lte),
-    (" != ", CompareOp::Neq),
-    (" > ", CompareOp::Gt),
-    (" < ", CompareOp::Lt),
-    (" = ", CompareOp::Eq),
-];
-
-impl WhereClause {
-    /// Parse a where clause string, which may contain `||` for OR.
-    ///
-    /// Examples:
-    ///   "status = to-watch"                        -> single expression
-    ///   "status = to-watch || status = watching"    -> OR of two expressions
-    pub fn parse(input: &str) -> Result<Self> {
-        let parts: Vec<&str> = input.split("||").collect();
-        let mut alternatives = Vec::new();
-        for part in parts {
-            alternatives.push(WhereExpr::parse(part)?);
-        }
-        Ok(WhereClause { alternatives })
-    }
-}
-
-impl WhereExpr {
-    /// Parse a single where-expression string.
-    ///
-    /// Examples:
-    ///   "status = to-watch"
-    ///   "tags contains topic/chinese"
-    ///   "tags !contains topic/chinese"   (negated)
-    ///   "hsk > 2"
-    ///   "rating exists"
-    ///   "rating !exists"                 (negated)
-    pub fn parse(input: &str) -> Result<Self> {
-        let input = input.trim();
-
-        // Try word-based operators first
-        for (pattern, op) in WORD_OPS {
-            if let Some(pos) = input.find(pattern) {
-                let field = input[..pos].trim().to_string();
-                let value_str = input[pos + pattern.len()..].trim();
-                let negated = pattern.contains('!');
-
-                if field.is_empty() {
-                    return Err(VaultdbError::InvalidWhereExpr(format!(
-                        "missing field name in: {}",
-                        input
-                    )));
-                }
-
-                let value = match op {
-                    CompareOp::Exists | CompareOp::Missing => None,
-                    _ => Some(value_str.to_string()),
-                };
-
-                // Validate regex at parse time
-                if matches!(op, CompareOp::Matches)
-                    && let Some(ref v) = value
-                    && Regex::new(v).is_err()
-                {
-                    return Err(VaultdbError::RegexError {
-                        pattern: v.clone(),
-                        reason: "invalid regex syntax".into(),
-                    });
-                }
-
-                return Ok(WhereExpr {
-                    field,
-                    op: op.clone(),
-                    negated,
-                    value,
-                });
-            }
-        }
-
-        // Try symbolic operators
-        for (pattern, op) in SYMBOL_OPS {
-            if let Some(pos) = input.find(pattern) {
-                let field = input[..pos].trim().to_string();
-                let value_str = input[pos + pattern.len()..].trim().to_string();
-
-                if field.is_empty() {
-                    return Err(VaultdbError::InvalidWhereExpr(format!(
-                        "missing field name in: {}",
-                        input
-                    )));
-                }
-
-                return Ok(WhereExpr {
-                    field,
-                    op: op.clone(),
-                    negated: false,
-                    value: Some(value_str),
-                });
-            }
-        }
-
-        Err(VaultdbError::InvalidWhereExpr(format!(
-            "no valid operator found in: {}",
-            input
-        )))
-    }
-
-    // The legacy `matches_with_links` evaluator is no longer needed: every
-    // call site has migrated to evaluating the public `Expr` AST via
-    // `evaluate_expr`/`evaluate_predicate` later in this file. The internal
-    // `WhereExpr`/`WhereClause` types now exist only as the parser's output
-    // (via `parse_where_clause`) which is then converted to `Expr` through
-    // `to_expr`/`to_predicate_expr`/`to_predicate`.
-}
-
-// ── Public query AST bridge ────────────────────────────────────────────────
-
-/// Parse a where-DSL string into the public [`crate::query::Expr`] AST.
-///
-/// Grammar (no parens, no quoting yet):
-///   expr   := and_term ( "&&" and_term )*           // AND between terms
-///   and_term := or_term  ( "||" or_term )*          // OR between alternatives
-///   or_term  := <leaf>                              // a single comparison
-///
-/// `&&` binds looser than `||` per common SQL convention: the input
-/// "a = 1 || b = 2 && c = 3" parses as `(a=1 || b=2) AND (c=3)`. To get
-/// the other grouping, split into multiple `--where` arguments at the CLI
-/// or build the `Expr` directly via the public AST.
-pub(crate) fn parse_where_clause(input: &str) -> Result<crate::query::Expr> {
-    let and_parts: Vec<&str> = input.split("&&").collect();
-    let mut and_exprs: Vec<crate::query::Expr> = Vec::with_capacity(and_parts.len());
-    for and_part in and_parts {
-        let trimmed = and_part.trim();
-        if trimmed.is_empty() {
-            return Err(VaultdbError::InvalidWhereExpr(format!(
-                "empty conjunct in: {}",
-                input
-            )));
-        }
-        let clause = WhereClause::parse(trimmed)?;
-        and_exprs.push(clause.to_expr());
-    }
-    Ok(match and_exprs.len() {
-        0 => crate::query::Expr::And(Vec::new()),
-        1 => and_exprs.into_iter().next().unwrap(),
-        _ => crate::query::Expr::And(and_exprs),
-    })
-}
-
-impl WhereClause {
-    /// Convert this internal AST into the new public `Expr` type.
-    ///
-    /// `WhereClause` holds a `Vec<WhereExpr>` with OR semantics.
-    /// - If there is exactly one alternative (the common case), return the
-    ///   expression directly to avoid a redundant single-element `Or`.
-    /// - If there are multiple alternatives, wrap them in `Expr::Or`.
-    pub fn to_expr(&self) -> crate::query::Expr {
-        let mut exprs: Vec<crate::query::Expr> = self
-            .alternatives
-            .iter()
-            .map(|alt| alt.to_predicate_expr())
-            .collect();
-
-        match exprs.len() {
-            0 => {
-                // Degenerate empty clause — treat as always-true; callers
-                // should not produce empty WhereClause, but be defensive.
-                crate::query::Expr::And(vec![])
-            }
-            1 => exprs.remove(0),
-            _ => crate::query::Expr::Or(exprs),
-        }
-    }
-}
-
-impl WhereExpr {
-    /// Convert this single internal expression into an `Expr`.
-    ///
-    /// Handles the `negated` flag by wrapping in `Expr::Not` when set.
-    fn to_predicate_expr(&self) -> crate::query::Expr {
-        let pred = crate::query::Expr::Predicate(self.to_predicate());
-        if self.negated {
-            crate::query::Expr::Not(Box::new(pred))
-        } else {
-            pred
-        }
-    }
-
-    /// Convert this single internal predicate into a `Predicate`.
-    ///
-    /// Value coercion: the internal AST stores values as `Option<String>`.
-    /// For `Equals` and `Contains` we coerce to `Value::Integer` / `Value::Float`
-    /// when the string parses as a number, falling back to `Value::String`.
-    /// For `Compare` ops the test suite expects `Value::Integer(2020)` from
-    /// `"year > 2020"`, so the same coercion applies there too.
-    pub fn to_predicate(&self) -> crate::query::Predicate {
-        use crate::filter::CompareOp as IOp;
-        use crate::query::{CompareOp as QOp, Predicate};
-        use crate::record::Value;
-
-        /// Best-effort numeric coercion of a where-clause RHS string.
-        fn coerce(s: &str) -> Value {
-            if let Ok(i) = s.parse::<i64>() {
-                return Value::Integer(i);
-            }
-            if let Ok(f) = s.parse::<f64>() {
-                return Value::Float(f);
-            }
-            Value::String(s.to_string())
-        }
-
-        let field = self.field.clone();
-        let rhs_str = self.value.as_deref().unwrap_or("");
-
-        match self.op {
-            IOp::Eq => Predicate::Equals {
-                field,
-                value: coerce(rhs_str),
-            },
-            IOp::Neq => Predicate::Compare {
-                field,
-                op: QOp::Ne,
-                value: coerce(rhs_str),
-            },
-            IOp::Gt => Predicate::Compare {
-                field,
-                op: QOp::Gt,
-                value: coerce(rhs_str),
-            },
-            IOp::Lt => Predicate::Compare {
-                field,
-                op: QOp::Lt,
-                value: coerce(rhs_str),
-            },
-            IOp::Gte => Predicate::Compare {
-                field,
-                op: QOp::Ge,
-                value: coerce(rhs_str),
-            },
-            IOp::Lte => Predicate::Compare {
-                field,
-                op: QOp::Le,
-                value: coerce(rhs_str),
-            },
-            IOp::Contains => Predicate::Contains {
-                field,
-                value: coerce(rhs_str),
-            },
-            IOp::StartsWith => Predicate::StartsWith {
-                field,
-                value: rhs_str.to_string(),
-            },
-            IOp::EndsWith => Predicate::EndsWith {
-                field,
-                value: rhs_str.to_string(),
-            },
-            IOp::Matches => Predicate::Matches {
-                field,
-                regex: rhs_str.to_string(),
-            },
-            IOp::Exists => Predicate::Exists { field },
-            IOp::Missing => Predicate::Missing { field },
-        }
-    }
-}
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
@@ -351,80 +34,11 @@ mod tests {
         PathBuf::from("/vault")
     }
 
-    #[test]
-    fn parse_eq() {
-        let expr = WhereExpr::parse("status = to-watch").unwrap();
-        assert_eq!(expr.field, "status");
-        assert!(matches!(expr.op, CompareOp::Eq));
-        assert_eq!(expr.value.as_deref(), Some("to-watch"));
-    }
-
-    #[test]
-    fn parse_neq() {
-        let expr = WhereExpr::parse("status != draft").unwrap();
-        assert!(matches!(expr.op, CompareOp::Neq));
-    }
-
-    #[test]
-    fn parse_gt() {
-        let expr = WhereExpr::parse("hsk > 2").unwrap();
-        assert_eq!(expr.field, "hsk");
-        assert!(matches!(expr.op, CompareOp::Gt));
-        assert_eq!(expr.value.as_deref(), Some("2"));
-    }
-
-    #[test]
-    fn parse_gte() {
-        let expr = WhereExpr::parse("year >= 2000").unwrap();
-        assert!(matches!(expr.op, CompareOp::Gte));
-    }
-
-    #[test]
-    fn parse_contains() {
-        let expr = WhereExpr::parse("tags contains topic/chinese").unwrap();
-        assert_eq!(expr.field, "tags");
-        assert!(matches!(expr.op, CompareOp::Contains));
-        assert_eq!(expr.value.as_deref(), Some("topic/chinese"));
-    }
-
-    #[test]
-    fn parse_exists() {
-        let expr = WhereExpr::parse("rating exists").unwrap();
-        assert_eq!(expr.field, "rating");
-        assert!(matches!(expr.op, CompareOp::Exists));
-        assert!(expr.value.is_none());
-    }
-
-    #[test]
-    fn parse_missing() {
-        let expr = WhereExpr::parse("rating missing").unwrap();
-        assert!(matches!(expr.op, CompareOp::Missing));
-    }
-
-    #[test]
-    fn parse_matches() {
-        let expr = WhereExpr::parse("_name matches ^The").unwrap();
-        assert!(matches!(expr.op, CompareOp::Matches));
-        assert_eq!(expr.value.as_deref(), Some("^The"));
-    }
-
-    #[test]
-    fn parse_startswith() {
-        let expr = WhereExpr::parse("status startswith to").unwrap();
-        assert!(matches!(expr.op, CompareOp::StartsWith));
-    }
-
-    #[test]
-    fn parse_invalid() {
-        assert!(WhereExpr::parse("no operator here").is_err());
-        assert!(WhereExpr::parse(" = value").is_err()); // empty field
-    }
-
-    // ── Evaluator tests via the public Expr API ─────────────────────────
-    //
-    // The legacy `WhereExpr::matches` / `matches_all` evaluator was removed
-    // alongside the public AST migration. These tests cover the same surface
-    // by parsing into `Expr` and evaluating via `evaluate_expr`.
+    // The legacy `WhereExpr::parse` direct-AST tests have been removed
+    // along with the legacy parser. Parser-shape tests now live in
+    // `crate::dsl::tests`. The evaluator tests below exercise the new
+    // pest-driven public API end-to-end (parse + evaluate) and so cover
+    // both layers.
 
     use crate::record::Value as V;
 
@@ -528,18 +142,11 @@ mod tests {
         assert!(!eval(&watched, "status = to-watch || status = watching"));
     }
 
-    #[test]
-    fn parse_not_contains_and_not_exists() {
-        // The internal `WhereExpr` parser still exposes the negated flag,
-        // so spot-check that `!contains` and `!exists` round-trip correctly
-        // through `Expr::parse` (the conversion shim wraps in `Expr::Not`).
-        use crate::query::Expr as E;
-        let e = E::parse("tags !contains topic/movies").unwrap();
-        assert!(matches!(e, E::Not(_)));
-
-        let e2 = E::parse("rating !exists").unwrap();
-        assert!(matches!(e2, E::Not(_)));
-    }
+    // Parser-shape tests for negation forms (`!contains`, `!exists`,
+    // word-NOT) live in `crate::dsl::tests` now. The 0.4.0 parser
+    // produces structurally normalized output (`!exists` → `Missing`
+    // rather than `Not(Exists)`), so this module's tests focus on the
+    // evaluator semantics rather than the AST shape.
 
     #[test]
     fn compare_values_cross_numeric_uses_float_scale() {
@@ -698,23 +305,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_and_binds_looser_than_or() {
+    fn parse_and_binds_tighter_than_or_sql_convention() {
         use crate::query::Expr as E;
 
-        // "a = 1 || b = 2 && c = 3" should parse as (a=1 || b=2) AND (c=3).
+        // SQL convention: AND binds tighter than OR. So
+        // "a = 1 || b = 2 && c = 3" parses as (a=1) || (b=2 && c=3),
+        // i.e. top-level Or with one Predicate arm and one And arm.
+        //
+        // (Earlier 0.3.0 had the opposite behaviour. The pest-based
+        // parser introduced in 0.4.0 fixes this.)
         let e = E::parse("status = draft || status = active && hsk = 1").unwrap();
         match e {
-            E::And(parts) => {
-                assert_eq!(parts.len(), 2, "expected two AND conjuncts");
-                // First conjunct is the OR
-                assert!(matches!(parts[0], E::Or(_)), "first should be Or");
-                // Second is the single hsk = 1 predicate
-                assert!(matches!(
-                    parts[1],
-                    E::Predicate(crate::query::Predicate::Equals { .. })
-                ));
+            E::Or(parts) => {
+                assert_eq!(parts.len(), 2, "expected two OR alternatives");
+                assert!(
+                    matches!(
+                        parts[0],
+                        E::Predicate(crate::query::Predicate::Equals { .. })
+                    ),
+                    "first arm should be a single Equals predicate, got {:?}",
+                    parts[0]
+                );
+                assert!(
+                    matches!(parts[1], E::And(_)),
+                    "second arm should be And, got {:?}",
+                    parts[1]
+                );
             }
-            other => panic!("expected And, got {:?}", other),
+            other => panic!("expected Or at top, got {:?}", other),
         }
     }
 
@@ -722,8 +340,10 @@ mod tests {
     fn parse_empty_and_conjunct_errors() {
         use crate::query::Expr as E;
 
-        // "a = 1 && && b = 2" — middle conjunct is empty, should error rather
-        // than silently parse as a degenerate clause.
+        // "a = 1 && && b = 2" — middle conjunct is empty, should error
+        // rather than silently parse as a degenerate clause. The pest
+        // grammar can't match `&& &&` anywhere, so this falls out as
+        // a real parse error.
         let e = E::parse("a = 1 && && b = 2");
         assert!(e.is_err(), "expected parse error for empty conjunct");
     }

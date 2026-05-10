@@ -1,0 +1,143 @@
+// where-DSL grammar for vaultdb-core's structured query filter.
+//
+// Operator precedence, low to high:
+//   1. ||   (logical OR)
+//   2. &&   (logical AND)
+//   3. NOT  (prefix; word `NOT` only — keep `!` for the legacy in-op `!exists` etc.)
+//   4. atomic predicate or parenthesised expression
+//
+// SQL convention: AND binds tighter than OR. So `a || b && c` is
+// `a || (b && c)`. Parens override.
+//
+// Comparison ops borrow from SQL idioms where they exist (`IN`,
+// `IS NULL`, `IS NOT NULL`) and from the legacy DSL where they
+// don't (`contains`, `startswith`, `endswith`, `matches`,
+// `exists`/`missing`). Negation works two ways: word `NOT` as a
+// prefix on any expr, or `!` directly attached to the legacy ops
+// (`!contains`, `!exists`, etc.) for backwards compatibility.
+
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+
+// Top-level: an expression terminated by EOI. The pest_derive entry
+// point is `expr_root`; pest enforces SOI/EOI here.
+expr_root = _{ SOI ~ expr ~ EOI }
+
+expr = { or_expr }
+
+or_expr  = { and_expr ~ ("||" ~ and_expr)* }
+and_expr = { not_expr ~ ("&&" ~ not_expr)* }
+
+// Word-level NOT prefix; right-associative so `NOT NOT a` parses.
+// (We keep the legacy `!`-attached negations on individual ops for
+// backwards compatibility with old --where strings.)
+//
+// `not_word` is atomic (`@`) so the lookahead operates on the raw
+// input, *before* pest's automatic whitespace skipping eats the space
+// after `NOT`. Without `@`, `!field_char` would be checked against the
+// next non-whitespace char (often the start of the operand) and
+// always fail.
+not_expr = { not_word ~ not_expr | atom }
+not_word = @{ "NOT" ~ !field_char }
+
+// Atom: either a parenthesised expression or a leaf predicate.
+atom = { paren_expr | predicate }
+paren_expr = { "(" ~ expr ~ ")" }
+
+// Predicates are tried in order; longest-match-wins matters for
+// `IS NOT NULL` vs `IS NULL`, `NOT IN` vs `IN`, `>=` vs `>`.
+predicate = {
+    in_predicate
+  | is_null_predicate
+  | regex_predicate
+  | exists_predicate
+  | binary_predicate
+}
+
+// `field IN (a, b, c)` and `field NOT IN (a, b, c)`.
+in_predicate = { field ~ in_op ~ "(" ~ value_list ~ ")" }
+in_op = { not_in_kw | in_kw }
+not_in_kw = { "NOT" ~ "IN" }
+in_kw     = { "IN" }
+value_list = { value ~ ("," ~ value)* }
+
+// `field IS NULL` and `field IS NOT NULL`. Also accept the legacy
+// `field exists` / `field missing` and their `!`-negated forms.
+is_null_predicate = { field ~ is_null_op }
+is_null_op = {
+    is_not_null_kw
+  | is_null_kw
+  | not_exists_kw
+  | exists_kw
+  | not_missing_kw
+  | missing_kw
+}
+is_not_null_kw = { "IS" ~ "NOT" ~ "NULL" }
+is_null_kw     = { "IS" ~ "NULL" }
+exists_kw      = { "exists" }
+not_exists_kw  = { "!exists" }
+missing_kw     = { "missing" }
+not_missing_kw = { "!missing" }
+
+// Same shape as `exists`/`missing` predicates above, kept separate
+// purely for grammar readability — but pest needs us to fold them
+// in. Above, `is_null_predicate` covers `exists`, `missing`, `IS
+// NULL`, `IS NOT NULL`. The conversion code reads `is_null_op` and
+// produces either a `Predicate::Exists` or `Predicate::Missing`
+// (negated as needed).
+
+// `field matches REGEX` and `field !matches REGEX`. Regex values
+// commonly contain characters (`^ $ * + ? . | \ [ ]`) that aren't
+// allowed in a normal unquoted value. So regex_value has its own,
+// more permissive rule for the unquoted form. For maximum safety
+// (whitespace, special chars), users should still quote.
+regex_predicate = { field ~ regex_op ~ regex_value }
+regex_op = { not_matches_kw | matches_kw }
+matches_kw     = { "matches" }
+not_matches_kw = { "!matches" }
+regex_value = { quoted_string | regex_unquoted }
+regex_unquoted = @{ regex_unquoted_char+ }
+regex_unquoted_char = _{
+    ASCII_ALPHANUMERIC
+  | "_" | "-" | "/" | "." | ":" | "@" | "+" | "#"
+  | "^" | "$" | "*" | "?" | "|" | "\\" | "[" | "]"
+}
+
+// Stub kept so that exists/missing predicates can be parsed even
+// when an expression-level NOT prefix is present without a value.
+exists_predicate = { field ~ exists_op_only }
+exists_op_only = { "exists" | "!exists" | "missing" | "!missing" }
+
+// `field <op> value` for everything else.
+binary_predicate = { field ~ binary_op ~ value }
+// Order matters: longer/!-prefixed forms come first to shadow shorter ones.
+binary_op = {
+    "<="    | ">="    | "!="
+  | "<"     | ">"     | "="
+  | "!contains"  | "contains"
+  | "!startswith" | "startswith"
+  | "!endswith"  | "endswith"
+}
+
+// Field name: alphanumeric plus a few separators commonly used in
+// markdown vault frontmatter (`_modified`, `topic-name`, `kind/foo`).
+field = @{ field_char+ }
+field_char = _{ ASCII_ALPHANUMERIC | "_" | "-" }
+
+// Values: quoted strings (single or double) for arbitrary content,
+// or unquoted tokens for the common no-spaces case.
+value = { quoted_string | unquoted_value }
+
+quoted_string = ${ dq_string | sq_string }
+dq_string = @{ "\"" ~ dq_inner ~ "\"" }
+dq_inner  = @{ (escaped | (!"\"" ~ ANY))* }
+sq_string = @{ "'" ~ sq_inner ~ "'" }
+sq_inner  = @{ (escaped | (!"'" ~ ANY))* }
+escaped = @{ "\\" ~ ANY }
+
+// Unquoted: alphanumeric plus the path/url/email-friendly punctuation
+// that shows up unquoted in the existing CLI's `--where` strings.
+unquoted_value = @{ unquoted_value_char+ }
+unquoted_value_char = _{
+    ASCII_ALPHANUMERIC
+  | "_" | "-" | "/" | "." | ":" | "@" | "+" | "#"
+}

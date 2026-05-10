@@ -5,6 +5,43 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — pest-driven where-DSL parser (Phase B item 1)
+
+- **Real parser at `crate::dsl`** powered by `pest`. The grammar lives
+  at `src/where_dsl.pest` and is the single source of truth.
+- **Parenthesised grouping**: `(a = 1 || b = 2) && c = 3` now works.
+- **Quoted string values**: `status = "in review"` and `'single
+  quotes'`, with backslash escapes (`\"`, `\'`, `\\`, `\n`, `\t`).
+- **`IN` and `NOT IN` operators**: `status IN (draft, active,
+  "in review")` desugars to an OR of equalities; `NOT IN` is the
+  negation. Quoted and unquoted values both work in the list.
+- **`IS NULL` / `IS NOT NULL`**: SQL-conventional aliases for the
+  existing `missing` / `exists` keywords. The legacy keywords still
+  work.
+- **Word-prefix `NOT`**: `NOT (status = active && hsk = 1)` for
+  arbitrary-expression negation. The legacy `!`-attached negations
+  (`!contains`, `!exists`, etc.) still work and are normalized into
+  the same AST shape.
+- **Improved parser error messages**: pest produces position-aware
+  errors that pinpoint where the input stopped matching, e.g.
+  `1:18 ^--- expected value`. Replaces the previous opaque
+  `"no valid operator found"` message.
+
+### Changed — DSL precedence (BREAKING within Phase B)
+
+- **`AND` now binds tighter than `OR`**, matching SQL convention.
+  In 0.3.0, `a || b && c` parsed as `(a || b) && c` (AND looser
+  than OR — incorrect). It now parses as `a || (b && c)`. Existing
+  `--where` strings that intended the AND-looser meaning need to
+  add explicit parens; everything else is unaffected.
+
+### Removed
+
+- Internal `WhereClause` / `WhereExpr` AST and the string-split
+  parser. The pest-driven parser produces `crate::query::Expr`
+  directly; tests that poked the legacy types via reflection have
+  been migrated to the public-API surface.
+
 ## [0.3.0] — Production-readiness pass
 
 This release closes the correctness and safety gaps documented in the
