@@ -6,13 +6,20 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
+keywords = ["mcp", "llm", "obsidian", "markdown", "vaultdb"]
+categories = ["command-line-utilities", "database"]
 
 [[bin]]
 name = "vaultdb-mcp"
 path = "src/main.rs"
 
 [dependencies]
-vaultdb-core = { path = "../vaultdb-core" }
+# Both `path` and `version` so that:
+#   - local development stays linked to the in-tree source via `path`
+#   - `cargo publish` resolves the dependency by version on crates.io
+# Required by crates.io: every dependency of a published crate must
+# declare a version requirement.
+vaultdb-core = { path = "../vaultdb-core", version = "1.0.0" }
 rmcp = { version = "1.6", features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
 serde = { version = "1", features = ["derive"] }

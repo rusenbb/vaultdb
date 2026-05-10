@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
+keywords = ["obsidian", "markdown", "yaml", "frontmatter", "database"]
+categories = ["database", "filesystem", "parser-implementations"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
