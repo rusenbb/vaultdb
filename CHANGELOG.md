@@ -5,7 +5,48 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added
+## [0.3.0] — Production-readiness pass
+
+This release closes the correctness and safety gaps documented in the
+SQLite-of-markdown audit. After v0.3.0, vaultdb-core is appropriate
+for use as the data layer of a long-lived Tauri/desktop app.
+
+### Added — concurrency, durability, recovery (Phase A)
+
+- **Vault-scoped exclusive write lock.** Every mutation builder's
+  `execute()` now acquires a flock-style lock at
+  `<vault>/.vaultdb/lock` for the duration of its work. Concurrent
+  mutations from any vaultdb-core consumer serialize cleanly. Uses
+  `fs2` for cross-platform support (POSIX + Windows). Thread + process
+  -level concurrency tests prove the lock works.
+- **Atomic per-file writes via tempfile + rename.** New
+  `writer::atomic_write` and `writer::atomic_write_with` write to a
+  same-directory tempfile and rename over the target. Concurrent
+  readers either see the full old or the full new content; never a
+  partial write.
+- **Crash-recovery journal for `RenameBuilder`.** Before any disk
+  change, the builder writes a journal at
+  `<vault>/.vaultdb/rename-journal/<timestamp>.json`. On crash, the
+  next mutation (or an explicit `Vault::recover()` call) replays it
+  idempotently and finishes the work. State machine handles
+  rename-not-yet-done, rewrites-incomplete, and stale (both files
+  gone) cases. New `crate::journal` module with full public surface.
+- **Opt-in fsync via `WriteOptions { fsync: bool }`.** Each mutation
+  builder gains `.write_options(opts)` and `.fsync(yes)` builders.
+  When fsync=true: temp files are fsynced before rename; parent
+  directories are fsynced after. After `execute()` returns, the
+  change survives sudden power loss. Default off (matches
+  pre-Phase-A behaviour). New `writer::fsync_dir` helper exposed.
+- **`Vault::recover()`** method for explicit startup recovery.
+  Long-lived consumers should call this at boot to finish any work
+  left over from a previous crash.
+- **`docs/SAFETY.md`** documenting every guarantee and non-guarantee:
+  concurrency model, atomicity (per-file + multi-file via journal),
+  durability contract, filesystem assumptions, recommended startup
+  sequence.
+
+### Added — vaultdb-mcp + ergonomics (Phase 3 of the rewrite spec)
+
 - `vaultdb-mcp` crate: a Model Context Protocol server (stdio) exposing
   vaultdb-core to LLM agents. 13 tools — `ping`, `query`, `find_by_name`,
   `list_folders`, `links`, `traverse`, `unresolved`, `schema_show`,
@@ -27,6 +68,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `[workspace.package]` inheritance for `version` / `edition` /
   `license` / `repository` across all member crates.
 
+### Added — error model
+
+- `VaultdbError::Internal(String)` variant for vaultdb-internal
+  invariant violations (e.g. journal serde failures). Bugs in
+  vaultdb-core or unrecoverable filesystem situations, not user errors.
+
 ### Changed
 - `vaultdb-core`'s public `VaultdbError` no longer leaks
   `serde_yaml::Error` (the `Yaml` variant is gone). Errors mapped to
@@ -41,7 +88,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `compare_values` now compares Integer/Float on a common float scale
   rather than falling through to debug-string ordering. Sort and
   `Compare` predicate evaluation are now correct across mixed numeric
-  types.
+  types. **Cross-type non-numeric pairs** (String vs Integer, Bool vs
+  List, etc.) now return `Ordering::Equal` and emit a `tracing::warn!`
+  at the call site, instead of producing alphabetical-debug-string
+  nonsense. Schema layer is the right place to enforce types.
 - README repositioned around the library: lead reframes vaultdb as
   "Markdown vaults, queryable everywhere you want to use them" and
   introduces the workspace table; new "Library usage (vaultdb-core)"
