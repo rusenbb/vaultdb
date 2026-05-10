@@ -60,8 +60,8 @@ pub fn parse_record(path: &str, raw: &str) -> Result<JsValue, JsValue> {
         .ok_or_else(|| JsValue::from_str("missing or malformed `---` frontmatter delimiters"))?;
     let fields: serde_yaml::Value = serde_yaml::from_str(frontmatter_yaml)
         .map_err(|e| JsValue::from_str(&format!("frontmatter parse: {e}")))?;
-    let json: serde_json::Value = serde_json::to_value(&fields)
-        .map_err(|e| JsValue::from_str(&format!("yaml→json: {e}")))?;
+    let json: serde_json::Value =
+        serde_json::to_value(&fields).map_err(|e| JsValue::from_str(&format!("yaml→json: {e}")))?;
     let record = ParsedRecord {
         path: path.to_string(),
         fields: json,
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn json_to_vaultdb_value_round_trip() {
         let input = serde_json::json!({"a": 1, "b": "two", "c": [true, null]});
-            let value = json_to_vaultdb_value(input);
+        let value = json_to_vaultdb_value(input);
         match value {
             Value::Map(m) => {
                 assert!(matches!(m.get("a"), Some(Value::Integer(1))));

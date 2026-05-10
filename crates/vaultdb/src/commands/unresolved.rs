@@ -66,7 +66,7 @@ pub fn run_unresolved(
 
     // Sort by number of references
     let mut sorted: Vec<(String, Vec<String>)> = unresolved.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
     if let Some(start) = from {
         println!(

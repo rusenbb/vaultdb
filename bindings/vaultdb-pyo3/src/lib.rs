@@ -72,9 +72,7 @@ fn list_records<'py>(
     recursive: bool,
 ) -> PyResult<Bound<'py, PyList>> {
     let vault = Vault::with_root(PathBuf::from(vault_root));
-    let folder_path = vault
-        .resolve_folder(folder)
-        .map_err(vaultdb_error_to_py)?;
+    let folder_path = vault.resolve_folder(folder).map_err(vaultdb_error_to_py)?;
     let load = vault
         .load_records(&folder_path, recursive, false)
         .map_err(vaultdb_error_to_py)?;

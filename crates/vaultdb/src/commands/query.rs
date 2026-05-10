@@ -291,7 +291,7 @@ pub fn run_tags(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> 
 
     // Sort by count descending
     let mut sorted: Vec<(String, usize)> = tag_counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     println!("{:<40} {}", "TAG".bold(), "COUNT".bold());
     println!("{}", "─".repeat(50));
