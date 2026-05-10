@@ -2,7 +2,28 @@
 
 [![crates.io](https://img.shields.io/crates/v/vaultdb.svg)](https://crates.io/crates/vaultdb)
 
-A database engine for your markdown files. Query, filter, mutate, and traverse [Obsidian](https://obsidian.md) vaults (or any folder of `.md` files with YAML frontmatter) from the command line.
+**Markdown vaults, queryable everywhere you want to use them.** vaultdb is a Rust library for treating folders of `.md` files with YAML frontmatter as a queryable database, plus the frontends that sit on it: a CLI (`vaultdb`), an MCP server for LLM agents (`vaultdb-mcp`), and a stable library API (`vaultdb-core`) that any markdown-vault tool can build on.
+
+The thesis: a markdown vault is *both* a relational table (frontmatter is rows × columns) *and* a graph (`[[wikilinks]]` are edges). vaultdb's query AST treats both as first-class — you filter records by frontmatter, by graph predicates ("links to anything tagged X"), or by any combination.
+
+```rust
+use vaultdb_core::{Expr, Predicate, Query, Value, Vault};
+
+let vault = Vault::discover(std::path::Path::new("."))?;
+let records = vault.query(&Query {
+    folder: "notes".into(),
+    filter: Some(Expr::Predicate(Predicate::Equals {
+        field: "status".into(),
+        value: Value::String("active".into()),
+    })),
+    select: None,
+    sort: None,
+    limit: Some(10),
+    recursive: false,
+})?;
+```
+
+Or from the CLI:
 
 ```
 $ vaultdb query 3-Notes --where "tags contains topic/ai" --select "_name,_backlink_count" --sort _backlink_count --desc --limit 5
@@ -28,8 +49,19 @@ $ vaultdb query 3-Notes --where "tags contains topic/ai" --select "_name,_backli
 - **Bulk mutations** (set fields, add/remove tags) with `--dry-run` safety
 - **Rename** with automatic wiki-link updates across the vault
 - **Schema inference** and validation
+- **Library + CLI + MCP server** in one workspace — pick whichever fits
 
 No daemon, no cache, no state files. Every command reads the current `.md` files directly. Edit in Obsidian, query with vaultdb — they coexist without conflict.
+
+## Workspace
+
+| Crate | What it is | Use for |
+|-------|------------|---------|
+| `vaultdb-core` | Library: parse, query, link graph, mutation builders | Building a markdown-vault tool in Rust |
+| `vaultdb` | CLI binary (this is what `cargo install vaultdb` ships) | Command-line use over an existing vault |
+| `vaultdb-mcp` | Model Context Protocol server (stdio) | Letting LLM agents (Claude, Cursor, etc.) query a vault |
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the design rules these frontends follow (library scope discipline, state boundaries, public API contract).
 
 ## Install
 
@@ -262,6 +294,74 @@ Two-parser architecture: `serde_yaml` for fast reads, line-by-line string manipu
 - `rename` auto-updates all `[[wiki-links]]` across the vault
 - Writer detects and refuses to modify flow-style YAML (`[a, b]`) or multiline scalars (`|`, `>`)
 - Files without frontmatter are loaded with empty fields (queryable by virtual fields, never silently skipped)
+
+## Library usage (vaultdb-core)
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+vaultdb-core = { git = "https://github.com/rusenbb/vaultdb" }
+```
+
+The full public surface lives at the crate root: `Vault`, `Record`, `Value`, `Query`, `Expr`, `Predicate`, `LinkPredicate`, `LinkGraph`, `GraphScope`, `Direction`, `UpdateBuilder`, `DeleteBuilder`, `MoveBuilder`, `RenameBuilder`, `MutationReport`, `LoadResult`, `ParseError`, `VaultdbError`. All public data types are `Serialize`/`Deserialize`-able.
+
+```rust
+use vaultdb_core::{
+    Expr, LinkPredicate, Query, UpdateBuilder, Value, Vault,
+};
+
+let vault = Vault::discover(std::path::Path::new("/path/to/vault"))?;
+
+// Records that link to anything tagged topic/ai
+let q = Query {
+    folder: "notes".into(),
+    filter: Some(Expr::LinksTo(LinkPredicate::Where(Box::new(
+        Expr::parse("tags contains topic/ai")?,
+    )))),
+    select: None,
+    sort: None,
+    limit: None,
+    recursive: false,
+};
+let hits = vault.query(&q)?;
+
+// Plan-only mutation: see what would change without writing
+let filter = Expr::parse("status = draft")?;
+let plan = UpdateBuilder::new("notes", filter)
+    .set("status", Value::String("published".into()))
+    .plan(&vault)?;
+for change in &plan.changes {
+    println!("{}: {}", change.path.display(), change.description);
+}
+```
+
+Every mutation builder exposes a `plan(&vault)` and an `execute(self, &vault)`. `plan` is read-only; `execute` runs the same computation and writes the result. The CLI's `--dry-run` flag is just `plan() + render`.
+
+## MCP server (vaultdb-mcp)
+
+`vaultdb-mcp` exposes the library as a Model Context Protocol server over stdio, so Claude, Cursor, and other MCP-aware clients can query and reason about a vault.
+
+```bash
+cargo install --path crates/vaultdb-mcp
+```
+
+Wire it into Claude Desktop's config (`~/.config/claude/claude_desktop_config.json` on Linux, `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "vaultdb": {
+      "command": "vaultdb-mcp",
+      "args": ["--vault", "/absolute/path/to/your/vault"]
+    }
+  }
+}
+```
+
+Tools exposed: `query`, `find_by_name`, `list_folders`, `links`, `traverse`, `unresolved`, `schema_show`, `schema_infer`, plus four **plan-only** mutation tools (`plan_update`, `plan_delete`, `plan_move`, `plan_rename`) that show what a change would do without writing — agents propose, you (or the host) decide whether to apply.
+
+There are intentionally no `execute_*` tools. Mutations go through the CLI or your own application code, with you in the loop.
 
 ## Claude Code integration
 
