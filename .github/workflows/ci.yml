@@ -1,0 +1,79 @@
+name: CI
+
+# Runs on every push to main and on every pull request. The dry-run
+# `cargo publish` step is the load-bearing one: it catches manifest
+# regressions (missing version requirement on a path-dep, malformed
+# license string, oversized package) long before tag time, when the
+# release workflow would discover them too late.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: cargo test (Linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # `-D warnings` makes clippy a hard gate. The same flag is
+      # used in vaultdb-core's local dev loop so PRs surface the
+      # same issues a developer would see before pushing.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  publish-dry-run:
+    name: publish dry-run
+    runs-on: ubuntu-22.04
+    # Only run when the test/clippy/fmt jobs pass — no point dry-running
+    # a manifest if the code itself doesn't compile.
+    needs: [test, clippy, fmt]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Each `--dry-run` packages the crate and verifies the resulting
+      # tarball compiles. We pass `--allow-dirty` because GitHub
+      # Actions sometimes leaves cache artefacts in the working tree.
+      #
+      # Ordering: vaultdb-core first because the others depend on it,
+      # but the dry-run uses the local path-dep so each command is
+      # independent at the manifest level (real publish sequencing
+      # lives in publish.yml).
+      - name: vaultdb-core
+        run: cargo publish --dry-run --allow-dirty -p vaultdb-core
+      # vaultdb-mcp and vaultdb depend on vaultdb-core. Their dry-run
+      # would normally fail because v1.0.0 isn't on crates.io yet —
+      # we use `cargo package` instead which validates the manifest
+      # and produces a tarball without running the dependency-
+      # resolution step that requires the registry.
+      - name: vaultdb-mcp (package only)
+        run: cargo package --allow-dirty -p vaultdb-mcp
+      - name: vaultdb CLI (package only)
+        run: cargo package --allow-dirty -p vaultdb
