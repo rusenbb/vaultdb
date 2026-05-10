@@ -143,16 +143,24 @@ fn yaml_to_field_value(value: serde_yaml::Value) -> Value {
     }
 }
 
+/// Replace the placeholder "<unknown>" file in an `InvalidFrontmatter` error
+/// with an actual file path, preserving the parser's reason. Other variants
+/// pass through unchanged.
+fn attach_path(err: VaultdbError, path: &Path) -> VaultdbError {
+    match err {
+        VaultdbError::InvalidFrontmatter { reason, .. } => VaultdbError::InvalidFrontmatter {
+            file: path.display().to_string(),
+            reason,
+        },
+        other => other,
+    }
+}
+
 /// Load a Record from a file path (frontmatter only, no raw content).
 pub fn load_record(path: &Path) -> Result<Record> {
     let content = std::fs::read_to_string(path)?;
     let fields = match extract_frontmatter(&content) {
-        Some((fm_text, _)) => {
-            parse_frontmatter(fm_text).map_err(|_| VaultdbError::InvalidFrontmatter {
-                file: path.display().to_string(),
-                reason: "failed to parse YAML".into(),
-            })?
-        }
+        Some((fm_text, _)) => parse_frontmatter(fm_text).map_err(|e| attach_path(e, path))?,
         None => {
             return Err(VaultdbError::NoFrontmatter(path.display().to_string()));
         }
@@ -169,12 +177,7 @@ pub fn load_record(path: &Path) -> Result<Record> {
 pub fn load_record_with_content(path: &Path) -> Result<Record> {
     let content = std::fs::read_to_string(path)?;
     let fields = match extract_frontmatter(&content) {
-        Some((fm_text, _)) => {
-            parse_frontmatter(fm_text).map_err(|_| VaultdbError::InvalidFrontmatter {
-                file: path.display().to_string(),
-                reason: "failed to parse YAML".into(),
-            })?
-        }
+        Some((fm_text, _)) => parse_frontmatter(fm_text).map_err(|e| attach_path(e, path))?,
         None => {
             return Err(VaultdbError::NoFrontmatter(path.display().to_string()));
         }
@@ -343,6 +346,34 @@ related-to:
     fn parse_only_whitespace_frontmatter() {
         let fields = parse_frontmatter("   \n  \n").unwrap();
         assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn invalid_frontmatter_preserves_yaml_parser_reason_and_path() {
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+
+        // Write a file with broken YAML and load it via load_record. The
+        // returned error must (a) have the actual file path, and (b)
+        // surface the YAML parser's reason — not the placeholder
+        // "failed to parse YAML" string we used to throw away.
+        let dir = TempDir::new().unwrap();
+        let path: PathBuf = dir.path().join("bad.md");
+        std::fs::write(&path, "---\n: : : not valid yaml here\n---\nbody\n").unwrap();
+
+        match load_record(&path) {
+            Err(VaultdbError::InvalidFrontmatter { file, reason }) => {
+                assert!(file.contains("bad.md"), "expected file path, got {}", file);
+                // The reason must NOT be the old placeholder string.
+                assert_ne!(reason, "failed to parse YAML");
+                // It should mention something serde_yaml-shaped.
+                assert!(
+                    !reason.is_empty(),
+                    "expected non-empty parser reason, got empty"
+                );
+            }
+            other => panic!("expected InvalidFrontmatter, got {:?}", other),
+        }
     }
 
     #[test]
