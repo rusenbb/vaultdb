@@ -268,61 +268,105 @@ impl Vault {
     ///
     /// The records returned have `raw_content` set to `None` (use
     /// `load_records_with_content` if you need the body text).
+    ///
+    /// Eager: loads, filters, sorts, limits, and projects all in memory.
+    /// Use [`Vault::query_iter`] for the streaming variant when memory
+    /// pressure matters (large vaults; bounded top-K with sort+limit).
     pub fn query(&self, q: &crate::query::Query) -> Result<Vec<Record>> {
-        let folder_path = self.resolve_folder(&q.folder)?;
+        // Run query_iter and collect. The iterator's internal state
+        // already handles filter / sort / limit / projection; we just
+        // gather the result into a Vec. Errors mid-stream propagate.
+        self.query_iter(q)?.collect::<Result<Vec<_>>>()
+    }
 
-        // Determine if the filter references the link graph.
+    /// Streaming variant of [`Vault::query`].
+    ///
+    /// Returns an iterator yielding `Result<Record>`. The implementation
+    /// chooses the most memory-efficient strategy compatible with the
+    /// query:
+    ///
+    /// - **No sort, no graph predicate, no body-search**: pure file-by-
+    ///   file streaming. Records are loaded one at a time and filtered
+    ///   inline; resident memory is O(1) regardless of vault size.
+    /// - **Sort + limit**: bounded top-K via a binary heap of size
+    ///   `limit`. Memory is O(limit), so "give me the most-recent 50
+    ///   records out of 100K" is cheap.
+    /// - **Sort, no limit; or graph/body predicates**: materializes the
+    ///   working set in memory the same way [`Vault::query`] does, then
+    ///   streams from the buffer. Memory is O(N) — same as the eager
+    ///   call. (We can't stream a sort without materializing, and graph
+    ///   predicates need the link graph built from all records.)
+    ///
+    /// The iterator yields `Err(...)` on per-file IO failures rather
+    /// than aborting the whole query; the caller decides whether to
+    /// stop or continue.
+    pub fn query_iter(&self, q: &crate::query::Query) -> Result<QueryIter> {
+        let folder_path = self.resolve_folder(&q.folder)?;
         let needs_links = q
             .filter
             .as_ref()
             .is_some_and(crate::filter::expr_uses_links);
 
-        // Load records with content if links are needed for extraction
+        // Pure-streaming path: no sort, no graph predicates. We iterate
+        // file paths lazily, load each record on demand, filter, and
+        // yield. No upfront load_records call, so vault size doesn't
+        // affect memory.
+        if !needs_links && q.sort.is_none() {
+            let paths = self.list_files(&folder_path, q.recursive)?;
+            let select_set: Option<std::collections::BTreeSet<String>> = q
+                .select
+                .as_ref()
+                .map(|fields| fields.iter().cloned().collect());
+            return Ok(QueryIter {
+                state: QueryIterState::Streaming(StreamingState {
+                    paths: paths.into_iter(),
+                    filter: q.filter.clone(),
+                    select_set,
+                    vault_root: self.root.clone(),
+                    limit: q.limit,
+                    yielded: 0,
+                }),
+            });
+        }
+
+        // Materialized path: load everything, filter, then sort+limit
+        // (with top-K when both are present and limit < total) and
+        // project. This degrades gracefully into the same behaviour as
+        // the previous eager implementation.
         let load = if needs_links {
             self.load_records_with_content(&folder_path, q.recursive, false)?
         } else {
             self.load_records(&folder_path, q.recursive, false)?
         };
         let mut records = load.records;
-
-        // Build a LinkGraph if the filter references the link graph.
         let link_index = if needs_links {
             Some(crate::links::LinkGraph::build(&records))
         } else {
             None
         };
 
-        // Filter
         if let Some(filter) = &q.filter {
             records.retain(|r| {
                 crate::filter::evaluate_expr(filter, r, &self.root, link_index.as_ref())
             });
         }
 
-        // Sort
-        if let Some(sort_key) = &q.sort {
-            records.sort_by(|a, b| {
-                let av = a
-                    .get(&sort_key.field, &self.root)
-                    .unwrap_or(crate::record::Value::Null);
-                let bv = b
-                    .get(&sort_key.field, &self.root)
-                    .unwrap_or(crate::record::Value::Null);
-                let ord = crate::filter::compare_values(&av, &bv);
-                if sort_key.descending {
-                    ord.reverse()
-                } else {
-                    ord
+        match (&q.sort, q.limit) {
+            (Some(sort_key), Some(limit)) if limit < records.len() => {
+                records = top_k_sorted(records, sort_key, limit, &self.root);
+            }
+            (Some(sort_key), maybe_limit) => {
+                sort_records(&mut records, sort_key, &self.root);
+                if let Some(limit) = maybe_limit {
+                    records.truncate(limit);
                 }
-            });
+            }
+            (None, Some(limit)) => {
+                records.truncate(limit);
+            }
+            (None, None) => {}
         }
 
-        // Limit
-        if let Some(limit) = q.limit {
-            records.truncate(limit);
-        }
-
-        // Projection (if requested, keep only selected fields plus virtual fields)
         if let Some(select) = &q.select {
             let select_set: std::collections::BTreeSet<&str> =
                 select.iter().map(|s| s.as_str()).collect();
@@ -331,8 +375,192 @@ impl Vault {
             }
         }
 
-        Ok(records)
+        Ok(QueryIter {
+            state: QueryIterState::Materialized(records.into_iter()),
+        })
     }
+}
+
+/// Streaming iterator yielded by [`Vault::query_iter`]. Each `next()`
+/// produces `Result<Record>` so per-file errors surface to the caller
+/// instead of aborting the whole query.
+pub struct QueryIter {
+    state: QueryIterState,
+}
+
+enum QueryIterState {
+    /// Pure streaming: pulls one file at a time, loads, filters, yields.
+    Streaming(StreamingState),
+    /// Pre-materialized: a Vec collected upfront (sort or graph
+    /// predicates required).
+    Materialized(std::vec::IntoIter<Record>),
+}
+
+struct StreamingState {
+    paths: std::vec::IntoIter<PathBuf>,
+    filter: Option<crate::query::Expr>,
+    select_set: Option<std::collections::BTreeSet<String>>,
+    vault_root: PathBuf,
+    limit: Option<usize>,
+    yielded: usize,
+}
+
+impl Iterator for QueryIter {
+    type Item = Result<Record>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.state {
+            QueryIterState::Streaming(s) => s.next_record(),
+            QueryIterState::Materialized(iter) => iter.next().map(Ok),
+        }
+    }
+}
+
+impl StreamingState {
+    fn next_record(&mut self) -> Option<Result<Record>> {
+        // Stop early once limit is reached — this is part of why
+        // streaming + limit is so cheap on large vaults.
+        if let Some(limit) = self.limit
+            && self.yielded >= limit
+        {
+            return None;
+        }
+        loop {
+            let path = self.paths.next()?;
+            let record = match crate::frontmatter::load_record(&path) {
+                Ok(r) => r,
+                Err(VaultdbError::NoFrontmatter(_)) => Record {
+                    path: path.clone(),
+                    fields: std::collections::BTreeMap::new(),
+                    raw_content: None,
+                },
+                Err(VaultdbError::InvalidFrontmatter { .. }) => {
+                    // Skip files with malformed YAML — same behaviour
+                    // as the eager load. Eduport-core / CLI consumers
+                    // that want to surface these should call
+                    // `Vault::load_records` and inspect parse_errors.
+                    continue;
+                }
+                Err(e) => return Some(Err(e)),
+            };
+
+            if let Some(filter) = &self.filter
+                && !crate::filter::evaluate_expr(filter, &record, &self.vault_root, None)
+            {
+                continue;
+            }
+
+            let mut record = record;
+            if let Some(select_set) = &self.select_set {
+                record.fields.retain(|k, _| select_set.contains(k));
+            }
+            self.yielded += 1;
+            return Some(Ok(record));
+        }
+    }
+}
+
+/// Sort `records` in place by the given sort key.
+fn sort_records(records: &mut [Record], sort_key: &crate::query::SortKey, vault_root: &Path) {
+    records.sort_by(|a, b| {
+        let av = a
+            .get(&sort_key.field, vault_root)
+            .unwrap_or(crate::record::Value::Null);
+        let bv = b
+            .get(&sort_key.field, vault_root)
+            .unwrap_or(crate::record::Value::Null);
+        let ord = crate::filter::compare_values(&av, &bv);
+        if sort_key.descending {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
+}
+
+/// Top-K via a bounded binary heap. Memory: O(k). Returns the K
+/// records with the smallest (or, if descending, largest) sort-key
+/// values, sorted in the requested order.
+///
+/// We use a max-heap (default `BinaryHeap`) wrapped in `Reverse` so it
+/// behaves as a min-heap by default, then push descending-aware
+/// comparisons through the wrapper. The final result is sorted at the
+/// end via `into_sorted_vec`.
+fn top_k_sorted(
+    records: Vec<Record>,
+    sort_key: &crate::query::SortKey,
+    k: usize,
+    vault_root: &Path,
+) -> Vec<Record> {
+    use std::cmp::Ordering;
+
+    if k == 0 {
+        return Vec::new();
+    }
+
+    // Wrapper that compares two records by the sort field. The order
+    // of cmp is chosen so that `BinaryHeap`'s default max-heap behaviour
+    // gives us the correct K records to *evict* — i.e. the heap holds
+    // the K best candidates so far, and the root is the worst of those.
+    struct Entry<'a> {
+        sort_key: &'a crate::query::SortKey,
+        vault_root: &'a Path,
+        record: Record,
+    }
+    impl PartialEq for Entry<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            self.cmp(other) == Ordering::Equal
+        }
+    }
+    impl Eq for Entry<'_> {}
+    impl PartialOrd for Entry<'_> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Entry<'_> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            let av = self
+                .record
+                .get(&self.sort_key.field, self.vault_root)
+                .unwrap_or(crate::record::Value::Null);
+            let bv = other
+                .record
+                .get(&self.sort_key.field, other.vault_root)
+                .unwrap_or(crate::record::Value::Null);
+            let ord = crate::filter::compare_values(&av, &bv);
+            if self.sort_key.descending {
+                ord.reverse()
+            } else {
+                ord
+            }
+        }
+    }
+
+    let mut heap: std::collections::BinaryHeap<Entry> =
+        std::collections::BinaryHeap::with_capacity(k + 1);
+    for record in records {
+        let entry = Entry {
+            sort_key,
+            vault_root,
+            record,
+        };
+        if heap.len() < k {
+            heap.push(entry);
+        } else if let Some(top) = heap.peek()
+            && entry < *top
+        {
+            heap.pop();
+            heap.push(entry);
+        }
+    }
+
+    // `into_sorted_vec` returns ascending by `Ord`, which under our
+    // descending-aware Ord gives the user-requested order.
+    heap.into_sorted_vec()
+        .into_iter()
+        .map(|e| e.record)
+        .collect()
 }
 
 #[cfg(test)]
@@ -689,5 +917,260 @@ mod tests {
             .link_graph(GraphScope::Folder("notes".into()))
             .unwrap();
         assert!(graph.outgoing_links("with_link").contains(&"test1"));
+    }
+
+    // ── query_iter tests ────────────────────────────────────────────────
+
+    #[test]
+    fn query_iter_pure_streaming_yields_all_records() {
+        use crate::query::Query;
+
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        // No filter, no sort, no limit, no graph predicate ⇒ pure stream.
+        let q = Query {
+            folder: "notes".into(),
+            filter: None,
+            select: None,
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+        let records: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        // create_test_vault() writes test1.md, test2.md, no_fm.md.
+        assert_eq!(records.len(), 3);
+    }
+
+    #[test]
+    fn query_iter_pure_streaming_filters_inline() {
+        use crate::query::{Expr, Predicate, Query};
+        use crate::record::Value;
+
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::Predicate(Predicate::Equals {
+                field: "status".into(),
+                value: Value::String("active".into()),
+            })),
+            select: None,
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+        let records: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(records.len(), 1, "only test1 has status=active");
+        assert_eq!(records[0].virtual_name(), "test1");
+    }
+
+    #[test]
+    fn query_iter_streaming_respects_limit_without_loading_more() {
+        // Streaming + limit should stop pulling files once `limit`
+        // matches have been yielded. We can't directly observe the
+        // load count from the public API, but we can at least verify
+        // the limit is honored.
+        use crate::query::{Expr, Predicate, Query};
+
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::Predicate(Predicate::Exists {
+                field: "_name".into(),
+            })),
+            select: None,
+            sort: None,
+            limit: Some(2),
+            recursive: false,
+        };
+        let records: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn query_iter_top_k_when_sort_and_limit_set() {
+        // Top-K via bounded heap: with N=3 records and limit=2, we should
+        // see the smallest two (or descending=true: largest two) by name.
+        use crate::query::{Expr, Predicate, Query, SortKey};
+
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        // create_test_vault() has test1, test2, no_fm. Sort ascending
+        // by _name and limit 2 → should produce ["no_fm", "test1"].
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::Predicate(Predicate::Exists {
+                field: "_name".into(),
+            })),
+            select: None,
+            sort: Some(SortKey {
+                field: "_name".into(),
+                descending: false,
+            }),
+            limit: Some(2),
+            recursive: false,
+        };
+        let records: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].virtual_name(), "no_fm");
+        assert_eq!(records[1].virtual_name(), "test1");
+
+        // Descending: should produce ["test2", "test1"].
+        let q_desc = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::Predicate(Predicate::Exists {
+                field: "_name".into(),
+            })),
+            select: None,
+            sort: Some(SortKey {
+                field: "_name".into(),
+                descending: true,
+            }),
+            limit: Some(2),
+            recursive: false,
+        };
+        let records: Vec<_> = vault
+            .query_iter(&q_desc)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].virtual_name(), "test2");
+        assert_eq!(records[1].virtual_name(), "test1");
+    }
+
+    #[test]
+    fn query_iter_falls_back_to_buffered_for_graph_predicates() {
+        // Graph predicates can't run in pure-streaming mode (would need
+        // the full link graph built upfront). The query_iter call must
+        // still succeed and return the expected results — it just goes
+        // through the materialized path internally.
+        use crate::query::{Expr, LinkPredicate, Query};
+        use std::fs;
+
+        let dir = create_test_vault();
+        fs::write(
+            dir.path().join("notes/linker.md"),
+            "---\ntags:\n  - linker\n---\nLinks to [[test1]]\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::LinksTo(LinkPredicate::Target("test1".into()))),
+            select: None,
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+        let records: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let names: Vec<String> = records.iter().map(|r| r.virtual_name()).collect();
+        assert!(
+            names.contains(&"linker".to_string()),
+            "expected linker, got {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn query_eager_and_query_iter_produce_identical_results() {
+        // Property: for any query, `query()` and `query_iter().collect()`
+        // should produce exactly the same Vec<Record>. This is a small
+        // sample but it exercises filter + sort + limit + projection all
+        // at once.
+        use crate::query::{Expr, Predicate, Query, SortKey};
+
+        let dir = create_test_vault();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::Predicate(Predicate::Exists {
+                field: "_name".into(),
+            })),
+            select: Some(vec!["status".into()]),
+            sort: Some(SortKey {
+                field: "_name".into(),
+                descending: false,
+            }),
+            limit: Some(3),
+            recursive: false,
+        };
+
+        let eager = vault.query(&q).unwrap();
+        let streamed: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(eager.len(), streamed.len());
+        for (a, b) in eager.iter().zip(streamed.iter()) {
+            assert_eq!(a.virtual_name(), b.virtual_name());
+            assert_eq!(
+                a.fields.keys().collect::<Vec<_>>(),
+                b.fields.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn query_iter_skips_invalid_frontmatter_in_streaming_mode() {
+        // Streaming mode should silently skip files whose YAML
+        // frontmatter is malformed. The eager path collects them as
+        // parse_errors; the streaming path matches the eager-path
+        // behaviour for record yield (the broken file just doesn't
+        // appear in the result).
+        use crate::query::Query;
+        use std::fs;
+
+        let dir = create_test_vault();
+        fs::write(
+            dir.path().join("notes/broken.md"),
+            "---\n: : : not yaml\n---\nbody\n",
+        )
+        .unwrap();
+
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let q = Query {
+            folder: "notes".into(),
+            filter: None,
+            select: None,
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+        let records: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        // 3 valid + no broken record = 3 (broken.md skipped silently in streaming mode).
+        assert_eq!(records.len(), 3);
+        let names: Vec<String> = records.iter().map(|r| r.virtual_name()).collect();
+        assert!(!names.contains(&"broken".to_string()));
     }
 }

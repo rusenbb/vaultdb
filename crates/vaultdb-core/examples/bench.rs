@@ -112,6 +112,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("3 samples");
     println!("link_graph(All): {:?}", best_lg);
 
+    // ── Streaming + top-K (sort + small limit) ─────────────────────────
+    // Goal: confirm that a sort + small limit doesn't pay the full
+    // O(N) sort cost. Top-K via the bench example uses a bounded
+    // heap of size `limit`.
+    let q_top_k = Query {
+        folder: "notes".into(),
+        filter: Some(Expr::Predicate(Predicate::Equals {
+            field: "status".into(),
+            value: Value::String("active".into()),
+        })),
+        select: None,
+        sort: Some(vaultdb_core::SortKey {
+            field: "_name".into(),
+            descending: true,
+        }),
+        limit: Some(10),
+        recursive: false,
+    };
+    let mut samples = Vec::new();
+    for _ in 0..3 {
+        let t = Instant::now();
+        let n_results = vault.query_iter(&q_top_k)?.count();
+        samples.push((t.elapsed(), n_results));
+    }
+    let (best_topk, _) = samples
+        .iter()
+        .min_by_key(|(d, _)| *d)
+        .copied()
+        .expect("3 samples");
+    println!("Streaming top-K (sort+limit=10): {:?}", best_topk);
+
+    // ── Streaming, pure (no sort) ───────────────────────────────────────
+    let q_stream = Query {
+        folder: "notes".into(),
+        filter: Some(Expr::Predicate(Predicate::Equals {
+            field: "status".into(),
+            value: Value::String("active".into()),
+        })),
+        select: None,
+        sort: None,
+        limit: None,
+        recursive: false,
+    };
+    let mut samples = Vec::new();
+    for _ in 0..3 {
+        let t = Instant::now();
+        let n_results = vault.query_iter(&q_stream)?.count();
+        samples.push((t.elapsed(), n_results));
+    }
+    let (best_stream, _) = samples
+        .iter()
+        .min_by_key(|(d, _)| *d)
+        .copied()
+        .expect("3 samples");
+    println!("Streaming pure (no sort, no graph): {:?}", best_stream);
+
     // Cleanup
     fs::remove_dir_all(&dir)?;
     let _ = LinkGraph::default(); // keep type imported on this line
