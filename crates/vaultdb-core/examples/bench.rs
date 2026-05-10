@@ -10,7 +10,7 @@
 //! making them up.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 
 use vaultdb_core::{Expr, GraphScope, LinkGraph, Predicate, Query, Value, Vault};
@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn generate_vault(folder: &PathBuf, n: usize) -> std::io::Result<()> {
+fn generate_vault(folder: &Path, n: usize) -> std::io::Result<()> {
     // Each note has frontmatter (status alternating) and ~3 wikilinks
     // pointing at other notes (some of which exist, some don't, simulating
     // a real vault with unresolved links).

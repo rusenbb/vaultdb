@@ -117,10 +117,9 @@ impl FromStr for Expr {
 
     fn from_str(input: &str) -> std::result::Result<Self, Self::Err> {
         // The where-DSL parser lives in `filter.rs` (alongside the rest of
-        // the evaluator). It produces an internal `WhereClause` AST which
-        // is converted to the public `Expr` shape here at the boundary.
-        let internal = crate::filter::parse_where_clause(input)?;
-        Ok(internal.to_expr())
+        // the evaluator). It produces an `Expr` directly — the
+        // crate-internal `WhereClause` AST is wrapped at the boundary.
+        crate::filter::parse_where_clause(input)
     }
 }
 

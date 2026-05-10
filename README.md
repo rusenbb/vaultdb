@@ -150,11 +150,26 @@ FIELD missing            # field is absent or null
 FIELD !exists            # negated exists (same as missing)
 ```
 
-Multiple `--where` flags are AND-ed. Use `||` within a single `--where` for OR:
+Boolean composition inside a single `--where`:
 
 ```bash
+# AND with &&  (binds looser than ||)
+--where "tags contains topic/ai && status = active"
+
+# OR with ||
 --where "status = active || status = pending"
+
+# Mixed: parses as (a || b) AND c
+--where "status = draft || status = active && hsk = 1"
 ```
+
+Multiple `--where` flags are also AND-ed (handy when one of the conjuncts contains `||` and you want to keep the grouping clean):
+
+```bash
+--where "status = active || status = pending" --where "tags contains topic/ai"
+```
+
+There are no parentheses in the DSL today; for grouped expressions, build the `Expr` directly via the library API or use multiple `--where` flags.
 
 ### Create
 

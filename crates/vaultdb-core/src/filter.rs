@@ -178,14 +178,36 @@ impl WhereExpr {
 
 // ── Public query AST bridge ────────────────────────────────────────────────
 
-/// Parse a where-DSL string into the internal `WhereClause` AST.
+/// Parse a where-DSL string into the public [`crate::query::Expr`] AST.
 ///
-/// Public-but-crate-internal: the public `Expr`'s `FromStr` delegates here
-/// and immediately converts to `Expr` via `WhereClause::to_expr`. The
-/// internal AST is kept because it's the natural output shape of the
-/// recursive-descent parser; no consumer outside of this module uses it.
-pub(crate) fn parse_where_clause(input: &str) -> Result<WhereClause> {
-    WhereClause::parse(input)
+/// Grammar (no parens, no quoting yet):
+///   expr   := and_term ( "&&" and_term )*           // AND between terms
+///   and_term := or_term  ( "||" or_term )*          // OR between alternatives
+///   or_term  := <leaf>                              // a single comparison
+///
+/// `&&` binds looser than `||` per common SQL convention: the input
+/// "a = 1 || b = 2 && c = 3" parses as `(a=1 || b=2) AND (c=3)`. To get
+/// the other grouping, split into multiple `--where` arguments at the CLI
+/// or build the `Expr` directly via the public AST.
+pub(crate) fn parse_where_clause(input: &str) -> Result<crate::query::Expr> {
+    let and_parts: Vec<&str> = input.split("&&").collect();
+    let mut and_exprs: Vec<crate::query::Expr> = Vec::with_capacity(and_parts.len());
+    for and_part in and_parts {
+        let trimmed = and_part.trim();
+        if trimmed.is_empty() {
+            return Err(VaultdbError::InvalidWhereExpr(format!(
+                "empty conjunct in: {}",
+                input
+            )));
+        }
+        let clause = WhereClause::parse(trimmed)?;
+        and_exprs.push(clause.to_expr());
+    }
+    Ok(match and_exprs.len() {
+        0 => crate::query::Expr::And(Vec::new()),
+        1 => and_exprs.into_iter().next().unwrap(),
+        _ => crate::query::Expr::And(and_exprs),
+    })
 }
 
 impl WhereClause {
@@ -538,6 +560,59 @@ mod tests {
             compare_values(&V::Integer(2), &V::Float(2.0)),
             Ordering::Equal
         );
+    }
+
+    #[test]
+    fn parse_and_combinator() {
+        use crate::query::Expr as E;
+
+        // "a = 1 && b = 2" -> And([Equals a, Equals b])
+        let e = E::parse("hsk = 1 && status = active").unwrap();
+        match e {
+            E::And(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(
+                    parts[0],
+                    E::Predicate(crate::query::Predicate::Equals { .. })
+                ));
+                assert!(matches!(
+                    parts[1],
+                    E::Predicate(crate::query::Predicate::Equals { .. })
+                ));
+            }
+            other => panic!("expected And, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_and_binds_looser_than_or() {
+        use crate::query::Expr as E;
+
+        // "a = 1 || b = 2 && c = 3" should parse as (a=1 || b=2) AND (c=3).
+        let e = E::parse("status = draft || status = active && hsk = 1").unwrap();
+        match e {
+            E::And(parts) => {
+                assert_eq!(parts.len(), 2, "expected two AND conjuncts");
+                // First conjunct is the OR
+                assert!(matches!(parts[0], E::Or(_)), "first should be Or");
+                // Second is the single hsk = 1 predicate
+                assert!(matches!(
+                    parts[1],
+                    E::Predicate(crate::query::Predicate::Equals { .. })
+                ));
+            }
+            other => panic!("expected And, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_empty_and_conjunct_errors() {
+        use crate::query::Expr as E;
+
+        // "a = 1 && && b = 2" — middle conjunct is empty, should error rather
+        // than silently parse as a degenerate clause.
+        let e = E::parse("a = 1 && && b = 2");
+        assert!(e.is_err(), "expected parse error for empty conjunct");
     }
 
     #[test]
