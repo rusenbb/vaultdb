@@ -68,3 +68,4 @@ pub use mutation::{
 pub use query::{CompareOp, Expr, LinkPredicate, Predicate, Query, SortKey};
 pub use record::{Record, Value};
 pub use vault::{LoadResult, Vault};
+pub use writer::WriteOptions;

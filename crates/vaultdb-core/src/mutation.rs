@@ -52,6 +52,7 @@ pub struct UpdateBuilder {
     unset_fields: Vec<String>,
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
+    write_options: writer::WriteOptions,
 }
 
 impl UpdateBuilder {
@@ -63,6 +64,7 @@ impl UpdateBuilder {
             unset_fields: Vec::new(),
             add_tags: Vec::new(),
             remove_tags: Vec::new(),
+            write_options: writer::WriteOptions::default(),
         }
     }
 
@@ -86,6 +88,20 @@ impl UpdateBuilder {
         self
     }
 
+    /// Replace the [`writer::WriteOptions`] used by `execute`. See its
+    /// docs for what each field controls. Defaults to fast (no fsync).
+    pub fn write_options(mut self, opts: writer::WriteOptions) -> Self {
+        self.write_options = opts;
+        self
+    }
+
+    /// Convenience: enable durable writes (fsync data + parent dir).
+    /// Equivalent to `.write_options(WriteOptions::durable())`.
+    pub fn fsync(mut self, yes: bool) -> Self {
+        self.write_options.fsync = yes;
+        self
+    }
+
     /// Compute the report without writing.
     pub fn plan(&self, vault: &Vault) -> Result<MutationReport> {
         let (report, _writes) = self.compute(vault)?;
@@ -103,7 +119,7 @@ impl UpdateBuilder {
         crate::lock::with_lock(&vault.root, || {
             let (report, writes) = self.compute(vault)?;
             for w in &writes {
-                writer::apply(w).map_err(VaultdbError::Io)?;
+                writer::apply_with(w, self.write_options).map_err(VaultdbError::Io)?;
             }
             Ok(report)
         })
@@ -211,6 +227,7 @@ pub struct DeleteBuilder {
     filter: Expr,
     folder: String,
     permanent: bool,
+    write_options: writer::WriteOptions,
 }
 
 impl DeleteBuilder {
@@ -219,11 +236,25 @@ impl DeleteBuilder {
             filter,
             folder: folder.into(),
             permanent: false,
+            write_options: writer::WriteOptions::default(),
         }
     }
 
     pub fn permanent(mut self, yes: bool) -> Self {
         self.permanent = yes;
+        self
+    }
+
+    /// Replace the [`writer::WriteOptions`] used by `execute`.
+    pub fn write_options(mut self, opts: writer::WriteOptions) -> Self {
+        self.write_options = opts;
+        self
+    }
+
+    /// Convenience: enable durable deletes (fsync the parent dir so the
+    /// dirent change is on disk before this returns).
+    pub fn fsync(mut self, yes: bool) -> Self {
+        self.write_options.fsync = yes;
         self
     }
 
@@ -264,6 +295,9 @@ impl DeleteBuilder {
         crate::lock::with_lock(&vault.root, || {
             let report = self.plan(vault)?;
             let mut errors = Vec::new();
+            // Track parents to fsync at the end if durability requested.
+            let mut dirs_to_fsync: std::collections::BTreeSet<PathBuf> =
+                std::collections::BTreeSet::new();
 
             if self.permanent {
                 for change in &report.changes {
@@ -272,6 +306,8 @@ impl DeleteBuilder {
                             path: change.path.clone(),
                             message: format!("remove failed: {}", e),
                         });
+                    } else if let Some(parent) = change.path.parent() {
+                        dirs_to_fsync.insert(parent.to_path_buf());
                     }
                 }
             } else {
@@ -285,6 +321,24 @@ impl DeleteBuilder {
                         errors.push(MutationError {
                             path: change.path.clone(),
                             message: format!("trash failed: {}", e),
+                        });
+                    } else {
+                        if let Some(parent) = change.path.parent() {
+                            dirs_to_fsync.insert(parent.to_path_buf());
+                        }
+                        dirs_to_fsync.insert(trash_dir.clone());
+                    }
+                }
+            }
+
+            // Honour the fsync write option: flush every modified parent
+            // directory's dirent so the metadata changes are durable.
+            if self.write_options.fsync {
+                for d in &dirs_to_fsync {
+                    if let Err(e) = writer::fsync_dir(d) {
+                        errors.push(MutationError {
+                            path: d.clone(),
+                            message: format!("fsync_dir failed: {}", e),
                         });
                     }
                 }
@@ -326,6 +380,7 @@ pub struct MoveBuilder {
     filter: Expr,
     folder: String,
     to_folder: String,
+    write_options: writer::WriteOptions,
 }
 
 impl MoveBuilder {
@@ -334,7 +389,20 @@ impl MoveBuilder {
             filter,
             folder: folder.into(),
             to_folder: to_folder.into(),
+            write_options: writer::WriteOptions::default(),
         }
+    }
+
+    /// Replace the [`writer::WriteOptions`] used by `execute`.
+    pub fn write_options(mut self, opts: writer::WriteOptions) -> Self {
+        self.write_options = opts;
+        self
+    }
+
+    /// Convenience: enable durable moves (fsync source + dest dirents).
+    pub fn fsync(mut self, yes: bool) -> Self {
+        self.write_options.fsync = yes;
+        self
     }
 
     pub fn plan(&self, vault: &Vault) -> Result<MutationReport> {
@@ -390,6 +458,8 @@ impl MoveBuilder {
                 std::fs::create_dir_all(&to_path).map_err(VaultdbError::Io)?;
             }
             let mut errors = report.errors;
+            let mut dirs_to_fsync: std::collections::BTreeSet<PathBuf> =
+                std::collections::BTreeSet::new();
             for change in &report.changes {
                 let filename = match change.path.file_name() {
                     Some(n) => n,
@@ -401,8 +471,25 @@ impl MoveBuilder {
                         path: change.path.clone(),
                         message: format!("rename failed: {}", e),
                     });
+                } else {
+                    if let Some(parent) = change.path.parent() {
+                        dirs_to_fsync.insert(parent.to_path_buf());
+                    }
+                    dirs_to_fsync.insert(to_path.clone());
                 }
             }
+
+            if self.write_options.fsync {
+                for d in &dirs_to_fsync {
+                    if let Err(e) = writer::fsync_dir(d) {
+                        errors.push(MutationError {
+                            path: d.clone(),
+                            message: format!("fsync_dir failed: {}", e),
+                        });
+                    }
+                }
+            }
+
             Ok(MutationReport {
                 changes: report.changes,
                 errors,
@@ -424,6 +511,7 @@ pub struct RenameBuilder {
     folder: String,
     from: String,
     to: String,
+    write_options: writer::WriteOptions,
 }
 
 impl RenameBuilder {
@@ -432,7 +520,21 @@ impl RenameBuilder {
             folder: folder.into(),
             from: from.into(),
             to: to.into(),
+            write_options: writer::WriteOptions::default(),
         }
+    }
+
+    /// Replace the [`writer::WriteOptions`] used by `execute`.
+    pub fn write_options(mut self, opts: writer::WriteOptions) -> Self {
+        self.write_options = opts;
+        self
+    }
+
+    /// Convenience: enable durable rename + backlink rewrites (fsync
+    /// every modified file's data and every modified directory's dirent).
+    pub fn fsync(mut self, yes: bool) -> Self {
+        self.write_options.fsync = yes;
+        self
     }
 
     pub fn plan(&self, vault: &Vault) -> Result<MutationReport> {
@@ -535,6 +637,14 @@ impl RenameBuilder {
             // per file). Each rewrite is itself idempotent so a partial
             // run + journal replay reaches the same end state.
             let mut errors = Vec::new();
+            let mut dirs_to_fsync: std::collections::BTreeSet<PathBuf> =
+                std::collections::BTreeSet::new();
+            if let Some(parent) = source.parent() {
+                dirs_to_fsync.insert(parent.to_path_buf());
+            }
+            if let Some(parent) = dest.parent() {
+                dirs_to_fsync.insert(parent.to_path_buf());
+            }
             for change in report.changes.iter().skip(1) {
                 let path = &change.path;
                 let content = match std::fs::read_to_string(path) {
@@ -551,11 +661,26 @@ impl RenameBuilder {
                 if new_content == content {
                     continue;
                 }
-                if let Err(e) = writer::atomic_write(path, &new_content) {
+                if let Err(e) = writer::atomic_write_with(path, &new_content, self.write_options) {
                     errors.push(MutationError {
                         path: path.clone(),
                         message: format!("write failed: {}", e),
                     });
+                }
+            }
+
+            // Fsync every dir whose dirent changed (the source's parent
+            // for the removed entry, the dest's parent for the added
+            // entry). atomic_write_with already fsynced the backlinks'
+            // parents internally when fsync was on.
+            if self.write_options.fsync {
+                for d in &dirs_to_fsync {
+                    if let Err(e) = writer::fsync_dir(d) {
+                        errors.push(MutationError {
+                            path: d.clone(),
+                            message: format!("fsync_dir failed: {}", e),
+                        });
+                    }
                 }
             }
 
@@ -784,6 +909,62 @@ mod tests {
         // b.md was NOT touched (its status is pending, doesn't match the filter)
         let b_after = fs::read_to_string(dir.path().join("notes/b.md")).unwrap();
         assert!(!b_after.contains("priority"));
+    }
+
+    #[test]
+    fn write_options_fsync_propagates_through_update_builder() {
+        // We can't easily test that fsync was actually called (no kernel
+        // hook from user space), but we can test that:
+        // 1. The fsync(true) builder method round-trips through to
+        //    write_options.fsync = true.
+        // 2. An update with fsync(true) still produces correct content
+        //    on disk.
+        // 3. WriteOptions::durable() is a shorthand for { fsync: true }.
+        use std::fs;
+        use tempfile::TempDir;
+
+        // 1. The fluent API.
+        let f1 = Expr::Predicate(Predicate::Equals {
+            field: "x".into(),
+            value: Value::Integer(1),
+        });
+        let b = UpdateBuilder::new("notes", f1).fsync(true);
+        assert!(b.write_options.fsync);
+
+        let f2 = Expr::Predicate(Predicate::Equals {
+            field: "x".into(),
+            value: Value::Integer(1),
+        });
+        let b =
+            UpdateBuilder::new("notes", f2).write_options(crate::writer::WriteOptions::durable());
+        assert!(b.write_options.fsync);
+
+        // 2. Real execute with fsync=true still produces correct content.
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/durable.md"),
+            "---\nstatus: active\n---\nBody.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let f3 = Expr::Predicate(Predicate::Equals {
+            field: "status".into(),
+            value: Value::String("active".into()),
+        });
+        let report = UpdateBuilder::new("notes", f3)
+            .set("priority", Value::Integer(99))
+            .fsync(true)
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(report.changes.len(), 1);
+        assert_eq!(report.errors.len(), 0);
+
+        let after = fs::read_to_string(dir.path().join("notes/durable.md")).unwrap();
+        assert!(after.contains("priority: 99"));
+        assert!(after.contains("status: active"));
     }
 
     #[test]

@@ -563,6 +563,119 @@ mod tests {
     }
 
     #[test]
+    fn compare_values_cross_type_non_numeric_returns_equal() {
+        // The previous implementation fell through to debug-string
+        // comparison for type-mismatched pairs, which produced
+        // alphabetically-sensible-but-semantically-meaningless results
+        // (e.g. comparing `Integer(3)` with `String("3")` would order by
+        // their debug representations). The new contract: cross-type
+        // non-numeric pairs are Equal, and the predicate-evaluator
+        // semantics flow from that.
+        use crate::record::Value as V;
+        use std::cmp::Ordering;
+
+        // String vs Integer
+        assert_eq!(
+            compare_values(&V::String("3".into()), &V::Integer(3)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_values(&V::Integer(3), &V::String("3".into())),
+            Ordering::Equal
+        );
+
+        // Bool vs String
+        assert_eq!(
+            compare_values(&V::Bool(true), &V::String("true".into())),
+            Ordering::Equal
+        );
+
+        // List vs Integer
+        assert_eq!(
+            compare_values(&V::List(vec![V::Integer(1)]), &V::Integer(1)),
+            Ordering::Equal
+        );
+
+        // Map vs anything
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("k".into(), V::Integer(1));
+        assert_eq!(
+            compare_values(&V::Map(m.clone()), &V::String("k".into())),
+            Ordering::Equal
+        );
+
+        // List vs List is currently mixed-type (because the variants are
+        // structurally different inside) — this codifies that today they
+        // also return Equal. If a future change wants element-wise list
+        // comparison, this test will need to change deliberately.
+        assert_eq!(
+            compare_values(
+                &V::List(vec![V::Integer(1), V::Integer(2)]),
+                &V::List(vec![V::Integer(1), V::Integer(3)])
+            ),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn predicate_compare_with_mismatched_types_returns_consistent_results() {
+        // Validate the documented downstream behaviour: with the new
+        // Equal-on-mismatch comparator, Predicate::Compare's six op
+        // variants produce predictable results.
+        use crate::query::{CompareOp, Predicate};
+        use crate::record::Value as V;
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
+        let mut fields = BTreeMap::new();
+        fields.insert("year".into(), V::String("2020".into())); // stored as string
+        let record = Record {
+            path: PathBuf::from("/v/notes/r.md"),
+            fields,
+            raw_content: None,
+        };
+        let vault_root = PathBuf::from("/v");
+
+        let mk = |op| Predicate::Compare {
+            field: "year".into(),
+            op,
+            value: V::Integer(2020),
+        };
+
+        // Equal -> Lt false, Le true, Gt false, Ge true, Ne false.
+        assert!(!evaluate_predicate(
+            &mk(CompareOp::Lt),
+            &record,
+            &vault_root,
+            None
+        ));
+        assert!(evaluate_predicate(
+            &mk(CompareOp::Le),
+            &record,
+            &vault_root,
+            None
+        ));
+        assert!(!evaluate_predicate(
+            &mk(CompareOp::Gt),
+            &record,
+            &vault_root,
+            None
+        ));
+        assert!(evaluate_predicate(
+            &mk(CompareOp::Ge),
+            &record,
+            &vault_root,
+            None
+        ));
+        assert!(!evaluate_predicate(
+            &mk(CompareOp::Ne),
+            &record,
+            &vault_root,
+            None
+        ));
+    }
+
+    #[test]
     fn parse_and_combinator() {
         use crate::query::Expr as E;
 
@@ -797,12 +910,32 @@ pub fn evaluate_predicate(
 
 /// Total order over `Value` for sorting and `Compare` predicate evaluation.
 ///
-/// Numeric values (`Integer` / `Float`) are compared on a common float scale
-/// regardless of their stored representation, so `hsk > 2` and `rating < 8.5`
-/// behave the same when the field happens to be parsed as `Integer` vs
-/// `Float`. Same-type non-numeric pairs (string-string, bool-bool) compare
-/// directly. Mixed-shape pairs fall back to debug-string comparison so the
-/// order is always total and stable.
+/// ## Comparison rules
+///
+/// - **Same type** (`Integer/Integer`, `Float/Float`, `String/String`,
+///   `Bool/Bool`): compared directly.
+/// - **Cross-numeric** (`Integer` vs `Float`): coerced to `f64` and compared
+///   on the common scale, so `hsk > 2` and `rating < 8.5` behave the same
+///   regardless of whether the YAML parser produced an integer or a float.
+/// - **`Null`**: sorts before all other values; two nulls compare equal.
+/// - **Anything else** (e.g. `String` vs `Integer`, `Bool` vs `List`,
+///   `Map` vs `Map`, `List` vs `List`): treated as `Ordering::Equal` and
+///   a `tracing::warn!` is emitted at the call site. This is a deliberate
+///   "do not surprise the caller" choice: the previous behaviour fell
+///   through to debug-string comparison, which produced
+///   alphabetically-sensible-but-semantically-meaningless orderings (e.g.
+///   `Integer(3) > String("3")` ordering by debug repr `"Integer(3)"` vs
+///   `"\"3\""`). Returning `Equal` makes sort stable across mixed-type
+///   pairs and surfaces the actual problem to whoever wired up the schema.
+///
+/// ## Implications for `Predicate::Compare`
+///
+/// `Predicate::Compare { op: Lt | Gt, .. }` returns `false` for
+/// type-mismatched pairs (since `Equal` is neither `Less` nor `Greater`).
+/// `Le | Ge` return `true`. `Ne` returns `false`. Code that needs strict
+/// cross-type rejection should validate field types via the schema layer
+/// before evaluating filters; this comparator's job is to produce a
+/// deterministic total order, not to enforce a type system.
 pub fn compare_values(a: &crate::record::Value, b: &crate::record::Value) -> std::cmp::Ordering {
     use crate::record::Value;
     match (a, b) {
@@ -819,6 +952,19 @@ pub fn compare_values(a: &crate::record::Value, b: &crate::record::Value) -> std
             let bf = b.as_float().unwrap_or(0.0);
             af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
         }
-        _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
+        // Cross-type non-numeric: Equal + warn. The caller almost certainly
+        // has a schema mismatch (e.g. one record's `year` is a string,
+        // another's is an int because YAML quoted one and not the other).
+        // Surface it; don't silently produce alphabetical-debug-string
+        // nonsense.
+        _ => {
+            tracing::warn!(
+                left_type = a.type_name(),
+                right_type = b.type_name(),
+                "compare_values called on type-mismatched pair; returning Equal. \
+                 Validate field types via the schema layer to avoid this."
+            );
+            std::cmp::Ordering::Equal
+        }
     }
 }

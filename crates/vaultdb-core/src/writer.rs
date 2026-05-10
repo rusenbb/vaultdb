@@ -474,19 +474,67 @@ fn reassemble(fm_lines: &[String], body: &str, original: &str) -> String {
     result
 }
 
-/// Atomically replace the contents of `path` with `content`.
+/// Options controlling how a write touches the filesystem.
 ///
-/// Writes to a temp file in the same directory, then renames over the
-/// target. The rename is atomic on POSIX same-filesystem operations and
-/// on Windows with `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`. Concurrent
-/// readers either see the full old content or the full new content;
-/// they never see a partial write.
+/// Default values match the previous (pre-Phase-A) `std::fs::write`
+/// behaviour: atomic at the rename, but not durable against power loss.
+/// Set `fsync: true` to force the data to stable storage before the
+/// write returns.
 ///
-/// This does NOT fsync by default. For durability in the face of
-/// power loss, callers should use the higher-level mutation builders
-/// with `WriteOptions::fsync = true` (added separately in Phase A
-/// item 4); this primitive intentionally stays free of policy.
+/// Designed to be `Copy + Default + serde::*` so it can be piped through
+/// the mutation builders, configured from env vars or config files, or
+/// surfaced over a Tauri command.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WriteOptions {
+    /// fsync the temp file's data, then fsync the parent directory's
+    /// metadata, before considering the write complete. Adds one or two
+    /// disk-flush IOs per write — typically 1–10ms on consumer SSDs and
+    /// 10–50ms on spinning disks. Required for durable mutations (e.g. a
+    /// long-lived Tauri app) that need to survive sudden power loss with
+    /// the change preserved.
+    pub fsync: bool,
+}
+
+impl WriteOptions {
+    /// Convenience: opts with `fsync` set to true.
+    pub fn durable() -> Self {
+        Self { fsync: true }
+    }
+}
+
+/// fsync a directory so its dirent updates (renames, creates, removes)
+/// are durable. Best-effort on Windows: opening a directory for sync
+/// is supported on NTFS but not all filesystems.
+pub fn fsync_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let f = std::fs::File::open(dir)?;
+    f.sync_all()
+}
+
+/// Atomically replace the contents of `path` with `content` using the
+/// default [`WriteOptions`] (no fsync). See [`atomic_write_with`] for the
+/// version that takes options.
 pub fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    atomic_write_with(path, content, WriteOptions::default())
+}
+
+/// Atomically replace the contents of `path` with `content`, honoring
+/// [`WriteOptions`].
+///
+/// Writes to a temp file in the same directory, optionally fsyncs the
+/// temp file's data, then renames over the target. The rename is atomic
+/// on POSIX same-filesystem operations and on Windows with
+/// `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`. Concurrent readers either
+/// see the full old content or the full new content; they never see a
+/// partial write.
+///
+/// When `opts.fsync` is true, the temp file is fsynced before rename
+/// AND the parent directory is fsynced after rename, so the change
+/// survives power loss the moment this function returns Ok.
+pub fn atomic_write_with(
+    path: &std::path::Path,
+    content: &str,
+    opts: WriteOptions,
+) -> std::io::Result<()> {
     let dir = path.parent().ok_or_else(|| {
         std::io::Error::other(format!(
             "atomic_write target has no parent dir: {}",
@@ -504,16 +552,34 @@ pub fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()
     tmp.write_all(content.as_bytes())?;
     tmp.flush()?;
 
+    // Optional data fsync before the rename. The order matters: if we
+    // rename first and then fsync, a power loss between the rename and
+    // the fsync can leave the rename visible but pointing at undefined
+    // data. POSIX guarantees that data fsynced before the rename is
+    // durable as soon as the rename's directory entry is durable.
+    if opts.fsync {
+        tmp.as_file().sync_all()?;
+    }
+
     // `persist` does the atomic rename. On error it returns the temp
     // file plus the io::Error; we discard the temp file (it'll be
     // cleaned up by Drop) and propagate just the error.
     tmp.persist(path).map_err(|e| e.error)?;
+
+    if opts.fsync {
+        fsync_dir(dir)?;
+    }
     Ok(())
 }
 
-/// Write a WriteResult to disk atomically.
+/// Write a WriteResult to disk atomically with default options.
 pub fn apply(result: &WriteResult) -> std::io::Result<()> {
-    atomic_write(&result.path, &result.modified_content)
+    apply_with(result, WriteOptions::default())
+}
+
+/// Write a WriteResult to disk atomically, honoring [`WriteOptions`].
+pub fn apply_with(result: &WriteResult, opts: WriteOptions) -> std::io::Result<()> {
+    atomic_write_with(&result.path, &result.modified_content, opts)
 }
 
 #[cfg(test)]
