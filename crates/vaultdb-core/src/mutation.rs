@@ -93,12 +93,20 @@ impl UpdateBuilder {
     }
 
     /// Plan, then apply each computed `WriteResult` to disk.
+    ///
+    /// Holds the vault-scoped exclusive lock (see [`crate::lock`]) for the
+    /// entire duration of compute + writes, so concurrent mutations from
+    /// other vaultdb-core consumers serialize cleanly. Each individual
+    /// file write is atomic via tempfile+rename — readers never see a
+    /// partial write.
     pub fn execute(self, vault: &Vault) -> Result<MutationReport> {
-        let (report, writes) = self.compute(vault)?;
-        for w in &writes {
-            writer::apply(w).map_err(VaultdbError::Io)?;
-        }
-        Ok(report)
+        crate::lock::with_lock(&vault.root, || {
+            let (report, writes) = self.compute(vault)?;
+            for w in &writes {
+                writer::apply(w).map_err(VaultdbError::Io)?;
+            }
+            Ok(report)
+        })
     }
 
     fn compute(&self, vault: &Vault) -> Result<(MutationReport, Vec<WriteResult>)> {
@@ -253,37 +261,39 @@ impl DeleteBuilder {
     }
 
     pub fn execute(self, vault: &Vault) -> Result<MutationReport> {
-        let report = self.plan(vault)?;
-        let mut errors = Vec::new();
+        crate::lock::with_lock(&vault.root, || {
+            let report = self.plan(vault)?;
+            let mut errors = Vec::new();
 
-        if self.permanent {
-            for change in &report.changes {
-                if let Err(e) = std::fs::remove_file(&change.path) {
-                    errors.push(MutationError {
-                        path: change.path.clone(),
-                        message: format!("remove failed: {}", e),
-                    });
+            if self.permanent {
+                for change in &report.changes {
+                    if let Err(e) = std::fs::remove_file(&change.path) {
+                        errors.push(MutationError {
+                            path: change.path.clone(),
+                            message: format!("remove failed: {}", e),
+                        });
+                    }
+                }
+            } else {
+                let trash_dir = vault.root.join(".trash");
+                if !report.changes.is_empty() {
+                    std::fs::create_dir_all(&trash_dir).map_err(VaultdbError::Io)?;
+                }
+                for change in &report.changes {
+                    let dest = unique_in_dir(&trash_dir, &change.path);
+                    if let Err(e) = std::fs::rename(&change.path, &dest) {
+                        errors.push(MutationError {
+                            path: change.path.clone(),
+                            message: format!("trash failed: {}", e),
+                        });
+                    }
                 }
             }
-        } else {
-            let trash_dir = vault.root.join(".trash");
-            if !report.changes.is_empty() {
-                std::fs::create_dir_all(&trash_dir).map_err(VaultdbError::Io)?;
-            }
-            for change in &report.changes {
-                let dest = unique_in_dir(&trash_dir, &change.path);
-                if let Err(e) = std::fs::rename(&change.path, &dest) {
-                    errors.push(MutationError {
-                        path: change.path.clone(),
-                        message: format!("trash failed: {}", e),
-                    });
-                }
-            }
-        }
 
-        Ok(MutationReport {
-            changes: report.changes,
-            errors,
+            Ok(MutationReport {
+                changes: report.changes,
+                errors,
+            })
         })
     }
 }
@@ -373,28 +383,30 @@ impl MoveBuilder {
     }
 
     pub fn execute(self, vault: &Vault) -> Result<MutationReport> {
-        let to_path = vault.root.join(&self.to_folder);
-        let report = self.plan(vault)?;
-        if !report.changes.is_empty() {
-            std::fs::create_dir_all(&to_path).map_err(VaultdbError::Io)?;
-        }
-        let mut errors = report.errors;
-        for change in &report.changes {
-            let filename = match change.path.file_name() {
-                Some(n) => n,
-                None => continue,
-            };
-            let dest = to_path.join(filename);
-            if let Err(e) = std::fs::rename(&change.path, &dest) {
-                errors.push(MutationError {
-                    path: change.path.clone(),
-                    message: format!("rename failed: {}", e),
-                });
+        crate::lock::with_lock(&vault.root, || {
+            let to_path = vault.root.join(&self.to_folder);
+            let report = self.plan(vault)?;
+            if !report.changes.is_empty() {
+                std::fs::create_dir_all(&to_path).map_err(VaultdbError::Io)?;
             }
-        }
-        Ok(MutationReport {
-            changes: report.changes,
-            errors,
+            let mut errors = report.errors;
+            for change in &report.changes {
+                let filename = match change.path.file_name() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let dest = to_path.join(filename);
+                if let Err(e) = std::fs::rename(&change.path, &dest) {
+                    errors.push(MutationError {
+                        path: change.path.clone(),
+                        message: format!("rename failed: {}", e),
+                    });
+                }
+            }
+            Ok(MutationReport {
+                changes: report.changes,
+                errors,
+            })
         })
     }
 }
@@ -468,54 +480,61 @@ impl RenameBuilder {
     }
 
     pub fn execute(self, vault: &Vault) -> Result<MutationReport> {
-        let folder_path = vault.resolve_folder(&self.folder)?;
-        let source = folder_path.join(format!("{}.md", self.from));
-        let dest = folder_path.join(format!("{}.md", self.to));
+        crate::lock::with_lock(&vault.root, || {
+            let folder_path = vault.resolve_folder(&self.folder)?;
+            let source = folder_path.join(format!("{}.md", self.from));
+            let dest = folder_path.join(format!("{}.md", self.to));
 
-        let report = self.plan(vault)?;
-        // If the plan reported errors at the source/dest stage, don't proceed.
-        if !report.errors.is_empty() {
-            return Ok(report);
-        }
+            let report = self.plan(vault)?;
+            // If the plan reported errors at the source/dest stage, don't proceed.
+            if !report.errors.is_empty() {
+                return Ok(report);
+            }
 
-        let mut errors = Vec::new();
+            let mut errors = Vec::new();
 
-        // Rename the source file
-        if let Err(e) = std::fs::rename(&source, &dest) {
-            return Ok(MutationReport {
-                changes: report.changes,
-                errors: vec![MutationError {
-                    path: source,
-                    message: format!("rename failed: {}", e),
-                }],
-            });
-        }
-
-        // Rewrite incoming wikilinks
-        for change in report.changes.iter().skip(1) {
-            let path = &change.path;
-            let content = match std::fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(e) => {
-                    errors.push(MutationError {
-                        path: path.clone(),
-                        message: format!("read failed: {}", e),
-                    });
-                    continue;
-                }
-            };
-            let new_content = rewrite_wikilinks(&content, &self.from, &self.to);
-            if let Err(e) = std::fs::write(path, new_content) {
-                errors.push(MutationError {
-                    path: path.clone(),
-                    message: format!("write failed: {}", e),
+            // Rename the source file. NOTE: this is NOT yet transactional —
+            // a crash between this rename and the backlink rewrites below
+            // leaves the vault with a renamed file but stale wikilinks.
+            // Phase A item 2 adds a journal so the rewrites can be replayed
+            // on the next startup. For now, the order (rename first, then
+            // rewrites) matches the previous behaviour.
+            if let Err(e) = std::fs::rename(&source, &dest) {
+                return Ok(MutationReport {
+                    changes: report.changes,
+                    errors: vec![MutationError {
+                        path: source,
+                        message: format!("rename failed: {}", e),
+                    }],
                 });
             }
-        }
 
-        Ok(MutationReport {
-            changes: report.changes,
-            errors,
+            // Rewrite incoming wikilinks atomically (tempfile + rename per file).
+            for change in report.changes.iter().skip(1) {
+                let path = &change.path;
+                let content = match std::fs::read_to_string(path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        errors.push(MutationError {
+                            path: path.clone(),
+                            message: format!("read failed: {}", e),
+                        });
+                        continue;
+                    }
+                };
+                let new_content = rewrite_wikilinks(&content, &self.from, &self.to);
+                if let Err(e) = writer::atomic_write(path, &new_content) {
+                    errors.push(MutationError {
+                        path: path.clone(),
+                        message: format!("write failed: {}", e),
+                    });
+                }
+            }
+
+            Ok(MutationReport {
+                changes: report.changes,
+                errors,
+            })
         })
     }
 }
@@ -730,5 +749,120 @@ mod tests {
         // b.md was NOT touched (its status is pending, doesn't match the filter)
         let b_after = fs::read_to_string(dir.path().join("notes/b.md")).unwrap();
         assert!(!b_after.contains("priority"));
+    }
+
+    #[test]
+    fn concurrent_updates_serialize_via_vault_lock() {
+        // Two threads each run an UpdateBuilder against the same vault.
+        // Without the lock, both would read a.md, both would compute their
+        // edit against the same baseline, and the second writer would
+        // clobber the first's change. With the lock, the second thread
+        // waits for the first to finish, re-reads the (now-updated) file,
+        // and applies its change on top. The result should reflect both
+        // edits, in some serial order.
+        use std::fs;
+        use std::sync::Arc;
+        use std::thread;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/race.md"),
+            "---\nstatus: active\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let vault_path = Arc::new(dir.path().to_path_buf());
+
+        let p1 = Arc::clone(&vault_path);
+        let t1 = thread::spawn(move || {
+            let vault = Vault::with_root((*p1).clone());
+            let filter = Expr::Predicate(Predicate::Equals {
+                field: "status".into(),
+                value: Value::String("active".into()),
+            });
+            UpdateBuilder::new("notes", filter)
+                .set("touched_by_t1", Value::Integer(1))
+                .execute(&vault)
+                .expect("t1 execute")
+        });
+
+        let p2 = Arc::clone(&vault_path);
+        let t2 = thread::spawn(move || {
+            let vault = Vault::with_root((*p2).clone());
+            let filter = Expr::Predicate(Predicate::Equals {
+                field: "status".into(),
+                value: Value::String("active".into()),
+            });
+            UpdateBuilder::new("notes", filter)
+                .set("touched_by_t2", Value::Integer(1))
+                .execute(&vault)
+                .expect("t2 execute")
+        });
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+        assert_eq!(r1.errors.len(), 0);
+        assert_eq!(r2.errors.len(), 0);
+
+        // The final file content must contain BOTH edits. If the lock
+        // failed, exactly one would survive (whichever thread wrote last)
+        // because the slower thread's snapshot would be stale.
+        let final_content = fs::read_to_string(dir.path().join("notes/race.md")).unwrap();
+        assert!(
+            final_content.contains("touched_by_t1"),
+            "t1's edit lost; concurrent writer race: {}",
+            final_content
+        );
+        assert!(
+            final_content.contains("touched_by_t2"),
+            "t2's edit lost; concurrent writer race: {}",
+            final_content
+        );
+    }
+
+    #[test]
+    fn atomic_write_does_not_leave_partial_files_on_failed_writes() {
+        // Direct test of the writer::atomic_write contract: if the write
+        // is interrupted, readers should never observe partial content.
+        // We simulate a failed write by trying to atomic_write to a path
+        // whose parent doesn't exist — that fails cleanly, and the
+        // ORIGINAL file (if any) should be untouched.
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("subdir/that-does-not-exist/x.md");
+        // Pre-existing target shouldn't be touched (there is none here, but
+        // the atomic_write itself must fail cleanly without side effects).
+        let result = crate::writer::atomic_write(&target, "new content");
+        assert!(
+            result.is_err(),
+            "expected atomic_write to fail when parent dir doesn't exist"
+        );
+
+        // Now: create a target with original content, then try a write
+        // that succeeds. Verify the file is fully replaced (no merge).
+        let real_dir = dir.path().join("real");
+        fs::create_dir(&real_dir).unwrap();
+        let real_target = real_dir.join("x.md");
+        fs::write(&real_target, "original").unwrap();
+        crate::writer::atomic_write(&real_target, "replacement").unwrap();
+        let after = fs::read_to_string(&real_target).unwrap();
+        assert_eq!(after, "replacement");
+
+        // No leftover tempfile in the directory.
+        let leftovers: Vec<_> = fs::read_dir(&real_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "expected no tempfile leftovers, found: {:?}",
+            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
     }
 }

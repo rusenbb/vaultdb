@@ -474,9 +474,46 @@ fn reassemble(fm_lines: &[String], body: &str, original: &str) -> String {
     result
 }
 
-/// Write a WriteResult to disk.
+/// Atomically replace the contents of `path` with `content`.
+///
+/// Writes to a temp file in the same directory, then renames over the
+/// target. The rename is atomic on POSIX same-filesystem operations and
+/// on Windows with `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`. Concurrent
+/// readers either see the full old content or the full new content;
+/// they never see a partial write.
+///
+/// This does NOT fsync by default. For durability in the face of
+/// power loss, callers should use the higher-level mutation builders
+/// with `WriteOptions::fsync = true` (added separately in Phase A
+/// item 4); this primitive intentionally stays free of policy.
+pub fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "atomic_write target has no parent dir: {}",
+            path.display()
+        ))
+    })?;
+
+    // tempfile::NamedTempFile creates a uniquely-named file in `dir`,
+    // which guarantees same-filesystem rename below. The file is
+    // cleaned up automatically on drop if `persist` isn't called (e.g.
+    // if the write fails mid-way).
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+
+    use std::io::Write;
+    tmp.write_all(content.as_bytes())?;
+    tmp.flush()?;
+
+    // `persist` does the atomic rename. On error it returns the temp
+    // file plus the io::Error; we discard the temp file (it'll be
+    // cleaned up by Drop) and propagate just the error.
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Write a WriteResult to disk atomically.
 pub fn apply(result: &WriteResult) -> std::io::Result<()> {
-    std::fs::write(&result.path, &result.modified_content)
+    atomic_write(&result.path, &result.modified_content)
 }
 
 #[cfg(test)]

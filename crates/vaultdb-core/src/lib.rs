@@ -50,6 +50,7 @@ pub mod error;
 pub mod filter;
 pub mod frontmatter;
 pub mod links;
+pub mod lock;
 pub mod mutation;
 pub mod query;
 pub mod record;
