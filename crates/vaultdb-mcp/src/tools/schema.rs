@@ -21,22 +21,15 @@ pub struct SchemaShowOutput {
 
 const SCHEMA_FILENAME: &str = "vaultdb-schema.yaml";
 
-pub fn schema_show(
-    vault: &Vault,
-    params: SchemaShowParams,
-) -> Result<SchemaShowOutput, ErrorData> {
+pub fn schema_show(vault: &Vault, params: SchemaShowParams) -> Result<SchemaShowOutput, ErrorData> {
     let path = vault.root.join(SCHEMA_FILENAME);
     let mut full = schema::load_schema(&path).map_err(|e| {
-        ErrorData::invalid_params(
-            format!("loading {}: {}", path.display(), e),
-            None,
-        )
+        ErrorData::invalid_params(format!("loading {}: {}", path.display(), e), None)
     })?;
 
     if let Some(folder) = params.folder {
-        full.collections.retain(|_, c| {
-            c.folder == folder || c.folder.starts_with(&format!("{}/", folder))
-        });
+        full.collections
+            .retain(|_, c| c.folder == folder || c.folder.starts_with(&format!("{}/", folder)));
     }
 
     Ok(SchemaShowOutput {

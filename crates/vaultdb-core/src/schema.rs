@@ -56,9 +56,8 @@ pub fn load_schema(path: &Path) -> Result<VaultSchema> {
     let content = std::fs::read_to_string(path).map_err(|_| {
         VaultdbError::SchemaError(format!("cannot read schema file: {}", path.display()))
     })?;
-    serde_yaml::from_str(&content).map_err(|e| {
-        VaultdbError::SchemaError(format!("parsing {}: {}", path.display(), e))
-    })
+    serde_yaml::from_str(&content)
+        .map_err(|e| VaultdbError::SchemaError(format!("parsing {}: {}", path.display(), e)))
 }
 
 /// Serialize a schema to YAML string.

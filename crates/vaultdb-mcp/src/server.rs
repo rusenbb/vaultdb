@@ -13,11 +13,7 @@
 //! see a single text content block whose body is JSON; LLMs handle this
 //! fine and the wire shape stays stable.
 
-use rmcp::{
-    ErrorData,
-    handler::server::wrapper::Parameters,
-    tool, tool_router,
-};
+use rmcp::{ErrorData, handler::server::wrapper::Parameters, tool, tool_router};
 use serde::Serialize;
 use vaultdb_core::vault::Vault;
 
@@ -84,20 +80,14 @@ impl VaultdbServer {
     #[tool(
         description = "Look up a single record by filename (without .md). Returns JSON null when the record doesn't exist."
     )]
-    fn find_by_name(
-        &self,
-        params: Parameters<FindByNameParams>,
-    ) -> Result<String, ErrorData> {
+    fn find_by_name(&self, params: Parameters<FindByNameParams>) -> Result<String, ErrorData> {
         json_string(tools::query::find_by_name(self.vault()?, params.0)?)
     }
 
     #[tool(
         description = "List the top-level folders in the vault that contain at least one .md file. Useful for discovering what folders are queryable."
     )]
-    fn list_folders(
-        &self,
-        params: Parameters<ListFoldersParams>,
-    ) -> Result<String, ErrorData> {
+    fn list_folders(&self, params: Parameters<ListFoldersParams>) -> Result<String, ErrorData> {
         json_string(tools::query::list_folders(self.vault()?, params.0)?)
     }
 
@@ -113,20 +103,14 @@ impl VaultdbServer {
     #[tool(
         description = "BFS traversal from a starting note up to a given depth. Returns each reached note paired with the depth it was found at."
     )]
-    fn traverse(
-        &self,
-        params: Parameters<TraverseParams>,
-    ) -> Result<String, ErrorData> {
+    fn traverse(&self, params: Parameters<TraverseParams>) -> Result<String, ErrorData> {
         json_string(tools::links::traverse(self.vault()?, params.0)?)
     }
 
     #[tool(
         description = "List all wikilinks across the vault that point at notes which don't exist."
     )]
-    fn unresolved(
-        &self,
-        params: Parameters<UnresolvedParams>,
-    ) -> Result<String, ErrorData> {
+    fn unresolved(&self, params: Parameters<UnresolvedParams>) -> Result<String, ErrorData> {
         json_string(tools::links::unresolved(self.vault()?, params.0)?)
     }
 
@@ -135,20 +119,14 @@ impl VaultdbServer {
     #[tool(
         description = "Show the persisted schema (vaultdb-schema.yaml). Optionally filter to one folder."
     )]
-    fn schema_show(
-        &self,
-        params: Parameters<SchemaShowParams>,
-    ) -> Result<String, ErrorData> {
+    fn schema_show(&self, params: Parameters<SchemaShowParams>) -> Result<String, ErrorData> {
         json_string(tools::schema::schema_show(self.vault()?, params.0)?)
     }
 
     #[tool(
         description = "Infer a schema from existing records in a folder. Returns the structured schema and a YAML rendering for human review."
     )]
-    fn schema_infer(
-        &self,
-        params: Parameters<SchemaInferParams>,
-    ) -> Result<String, ErrorData> {
+    fn schema_infer(&self, params: Parameters<SchemaInferParams>) -> Result<String, ErrorData> {
         json_string(tools::schema::schema_infer(self.vault()?, params.0)?)
     }
 
@@ -161,40 +139,28 @@ impl VaultdbServer {
     #[tool(
         description = "Plan-only update. Shows what an update would change without writing. Set fields with field=value strings. Use add_tag/remove_tag for the tags list."
     )]
-    fn plan_update(
-        &self,
-        params: Parameters<PlanUpdateParams>,
-    ) -> Result<String, ErrorData> {
+    fn plan_update(&self, params: Parameters<PlanUpdateParams>) -> Result<String, ErrorData> {
         json_string(tools::mutations::plan_update(self.vault()?, params.0)?)
     }
 
     #[tool(
         description = "Plan-only delete. Shows which files would move to .trash/ (or be permanently deleted with permanent=true). Does NOT delete."
     )]
-    fn plan_delete(
-        &self,
-        params: Parameters<PlanDeleteParams>,
-    ) -> Result<String, ErrorData> {
+    fn plan_delete(&self, params: Parameters<PlanDeleteParams>) -> Result<String, ErrorData> {
         json_string(tools::mutations::plan_delete(self.vault()?, params.0)?)
     }
 
     #[tool(
         description = "Plan-only move. Shows which files would be relocated to a destination folder. Does NOT move."
     )]
-    fn plan_move(
-        &self,
-        params: Parameters<PlanMoveParams>,
-    ) -> Result<String, ErrorData> {
+    fn plan_move(&self, params: Parameters<PlanMoveParams>) -> Result<String, ErrorData> {
         json_string(tools::mutations::plan_move(self.vault()?, params.0)?)
     }
 
     #[tool(
         description = "Plan-only rename. Shows the rename plus every backlink rewrite across the vault. Does NOT rename."
     )]
-    fn plan_rename(
-        &self,
-        params: Parameters<PlanRenameParams>,
-    ) -> Result<String, ErrorData> {
+    fn plan_rename(&self, params: Parameters<PlanRenameParams>) -> Result<String, ErrorData> {
         json_string(tools::mutations::plan_rename(self.vault()?, params.0)?)
     }
 }

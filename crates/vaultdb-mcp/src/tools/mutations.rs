@@ -16,21 +16,16 @@ use vaultdb_core::query::Expr;
 use vaultdb_core::record::Value;
 use vaultdb_core::vault::Vault;
 
-use crate::params::{
-    PlanDeleteParams, PlanMoveParams, PlanRenameParams, PlanUpdateParams,
-};
+use crate::params::{PlanDeleteParams, PlanMoveParams, PlanRenameParams, PlanUpdateParams};
 
-pub fn plan_update(
-    vault: &Vault,
-    params: PlanUpdateParams,
-) -> Result<MutationReport, ErrorData> {
+pub fn plan_update(vault: &Vault, params: PlanUpdateParams) -> Result<MutationReport, ErrorData> {
     let filter = parse_where(&params.r#where)?;
     let mut builder = UpdateBuilder::new(params.folder, filter);
 
     for s in params.set {
-        let (field, value_str) = s
-            .split_once('=')
-            .ok_or_else(|| invalid_params(format!("--set requires FIELD=VALUE format, got: {}", s)))?;
+        let (field, value_str) = s.split_once('=').ok_or_else(|| {
+            invalid_params(format!("--set requires FIELD=VALUE format, got: {}", s))
+        })?;
         builder = builder.set(field.trim(), parse_set_value(value_str.trim()));
     }
     for field in params.unset {
@@ -48,10 +43,7 @@ pub fn plan_update(
         .map_err(|e| invalid_params(format!("plan_update failed: {}", e)))
 }
 
-pub fn plan_delete(
-    vault: &Vault,
-    params: PlanDeleteParams,
-) -> Result<MutationReport, ErrorData> {
+pub fn plan_delete(vault: &Vault, params: PlanDeleteParams) -> Result<MutationReport, ErrorData> {
     let filter = parse_where(&params.r#where)?;
     DeleteBuilder::new(params.folder, filter)
         .permanent(params.permanent)
@@ -59,20 +51,14 @@ pub fn plan_delete(
         .map_err(|e| invalid_params(format!("plan_delete failed: {}", e)))
 }
 
-pub fn plan_move(
-    vault: &Vault,
-    params: PlanMoveParams,
-) -> Result<MutationReport, ErrorData> {
+pub fn plan_move(vault: &Vault, params: PlanMoveParams) -> Result<MutationReport, ErrorData> {
     let filter = parse_where(&params.r#where)?;
     MoveBuilder::new(params.folder, params.to, filter)
         .plan(vault)
         .map_err(|e| invalid_params(format!("plan_move failed: {}", e)))
 }
 
-pub fn plan_rename(
-    vault: &Vault,
-    params: PlanRenameParams,
-) -> Result<MutationReport, ErrorData> {
+pub fn plan_rename(vault: &Vault, params: PlanRenameParams) -> Result<MutationReport, ErrorData> {
     RenameBuilder::new(params.folder, params.from, params.to)
         .plan(vault)
         .map_err(|e| invalid_params(format!("plan_rename failed: {}", e)))
@@ -81,8 +67,7 @@ pub fn plan_rename(
 // ── helpers ────────────────────────────────────────────────────────────────
 
 fn parse_where(s: &str) -> Result<Expr, ErrorData> {
-    Expr::parse(s)
-        .map_err(|e| invalid_params(format!("invalid where expression '{}': {}", s, e)))
+    Expr::parse(s).map_err(|e| invalid_params(format!("invalid where expression '{}': {}", s, e)))
 }
 
 /// Best-effort numeric-or-string coercion for plan_update's `field=value`.

@@ -43,10 +43,7 @@ pub struct TraverseHit {
     pub depth: usize,
 }
 
-pub fn traverse(
-    vault: &Vault,
-    params: TraverseParams,
-) -> Result<Vec<TraverseHit>, ErrorData> {
+pub fn traverse(vault: &Vault, params: TraverseParams) -> Result<Vec<TraverseHit>, ErrorData> {
     let direction = parse_direction(&params.direction)?;
     let graph = vault
         .link_graph(GraphScope::All)

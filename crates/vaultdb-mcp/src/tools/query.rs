@@ -13,9 +13,9 @@ use crate::params::{FindByNameParams, ListFoldersParams, QueryParams};
 /// (with `raw_content` stripped to keep the wire format compact).
 pub fn query(vault: &Vault, params: QueryParams) -> Result<Vec<Record>, ErrorData> {
     let filter = match params.r#where.as_deref() {
-        Some(s) if !s.is_empty() => Some(
-            Expr::parse(s).map_err(|e| invalid("invalid where expression", e))?,
-        ),
+        Some(s) if !s.is_empty() => {
+            Some(Expr::parse(s).map_err(|e| invalid("invalid where expression", e))?)
+        }
         _ => None,
     };
     let select = params
@@ -44,10 +44,7 @@ pub fn query(vault: &Vault, params: QueryParams) -> Result<Vec<Record>, ErrorDat
 
 /// Single-record lookup. Returns `null` when the record doesn't exist
 /// (caller can distinguish "not found" from "error").
-pub fn find_by_name(
-    vault: &Vault,
-    params: FindByNameParams,
-) -> Result<Option<Record>, ErrorData> {
+pub fn find_by_name(vault: &Vault, params: FindByNameParams) -> Result<Option<Record>, ErrorData> {
     vault
         .find_by_name(&params.folder, &params.name)
         .map(|opt| opt.map(strip_one))
@@ -56,13 +53,9 @@ pub fn find_by_name(
 
 /// Walk the vault root and list direct subdirectories that contain
 /// at least one `.md` file (those are the folders worth querying).
-pub fn list_folders(
-    vault: &Vault,
-    _params: ListFoldersParams,
-) -> Result<Vec<String>, ErrorData> {
+pub fn list_folders(vault: &Vault, _params: ListFoldersParams) -> Result<Vec<String>, ErrorData> {
     let mut folders = Vec::new();
-    let entries = std::fs::read_dir(&vault.root)
-        .map_err(|e| invalid("read_dir failed", e))?;
+    let entries = std::fs::read_dir(&vault.root).map_err(|e| invalid("read_dir failed", e))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -84,9 +77,7 @@ pub fn list_folders(
                     .find(|e| e.path().extension().is_some_and(|ext| ext == "md"))
             })
             .is_some();
-        if has_markdown
-            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-        {
+        if has_markdown && let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             folders.push(name.to_string());
         }
     }

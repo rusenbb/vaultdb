@@ -86,12 +86,11 @@ pub fn parse_frontmatter(yaml_text: &str) -> Result<BTreeMap<String, Value>> {
         return Ok(BTreeMap::new());
     }
 
-    let value: serde_yaml::Value = serde_yaml::from_str(yaml_text).map_err(|e| {
-        VaultdbError::InvalidFrontmatter {
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(yaml_text).map_err(|e| VaultdbError::InvalidFrontmatter {
             file: "<unknown>".into(),
             reason: e.to_string(),
-        }
-    })?;
+        })?;
 
     match value {
         serde_yaml::Value::Mapping(map) => {

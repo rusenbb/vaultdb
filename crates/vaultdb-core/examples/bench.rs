@@ -129,7 +129,10 @@ fn generate_vault(folder: &Path, n: usize) -> std::io::Result<()> {
             let a = (i + 1) % n;
             let b = (i + 7) % n;
             let c = (i + 113) % n;
-            format!("Body. See [[{}]], [[{}]], [[{}]].", names[a], names[b], names[c])
+            format!(
+                "Body. See [[{}]], [[{}]], [[{}]].",
+                names[a], names[b], names[c]
+            )
         } else {
             "Body.".to_string()
         };
