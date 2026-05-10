@@ -47,17 +47,24 @@ pub struct FieldSchema {
 }
 
 /// Load schema from a file.
+///
+/// Errors are mapped to `VaultdbError::SchemaError` with a human-readable
+/// reason — the underlying YAML parser is an implementation detail and is
+/// deliberately not exposed in the public error type, so consumers don't
+/// transitively depend on whichever YAML crate vaultdb chooses today.
 pub fn load_schema(path: &Path) -> Result<VaultSchema> {
     let content = std::fs::read_to_string(path).map_err(|_| {
         VaultdbError::SchemaError(format!("cannot read schema file: {}", path.display()))
     })?;
-    let schema: VaultSchema = serde_yaml::from_str(&content)?;
-    Ok(schema)
+    serde_yaml::from_str(&content).map_err(|e| {
+        VaultdbError::SchemaError(format!("parsing {}: {}", path.display(), e))
+    })
 }
 
 /// Serialize a schema to YAML string.
 pub fn schema_to_yaml(schema: &VaultSchema) -> Result<String> {
-    Ok(serde_yaml::to_string(schema)?)
+    serde_yaml::to_string(schema)
+        .map_err(|e| VaultdbError::SchemaError(format!("rendering schema as YAML: {}", e)))
 }
 
 /// A single validation violation.
