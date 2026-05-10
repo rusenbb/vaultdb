@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "vaultdb"
+description = "Treat your Obsidian-style markdown vault as a queryable database"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "rusenbb" }]
+readme = "README.md"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Markup :: Markdown",
+]
+# Version is read from Cargo.toml at build time; maturin keeps the
+# wheel and crate versions aligned automatically.
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/rusenbb/vaultdb"
+Issues = "https://github.com/rusenbb/vaultdb/issues"
+
+[tool.maturin]
+# Build a stable-ABI wheel (`abi3-py39` feature in Cargo.toml). One
+# wheel covers CPython 3.9, 3.10, 3.11, 3.12, 3.13 — saves ~5x on
+# wheel build time and PyPI storage.
+features = ["pyo3/extension-module"]
+strip = true

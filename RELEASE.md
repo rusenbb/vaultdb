@@ -76,15 +76,62 @@ forever — the next release must increment.
 
 ## Language bindings (Phase E)
 
-`bindings/vaultdb-pyo3/` and `bindings/vaultdb-wasm/` ship as
-separate crates under the same workspace. They are NOT published
-to crates.io; they have their own publishing pipelines:
+`bindings/vaultdb-pyo3/` and `bindings/vaultdb-wasm/` are
+in-workspace crates that ship to non-crates.io registries:
 
-- **`vaultdb-pyo3`** → built into a Python wheel via `maturin`,
-  published to PyPI as `vaultdb` (PyPI package name; the crate
-  name is `vaultdb-pyo3` to disambiguate at the Rust level).
-- **`vaultdb-wasm`** → built via `wasm-pack` into a JS package,
-  published to npm as `@rusenbb/vaultdb` (the leading `@` is
-  required because the bare `vaultdb` slot on npm is taken).
+- **`vaultdb-pyo3`** → Python wheel via `maturin`, published to
+  PyPI as `vaultdb`.
+- **`vaultdb-wasm`** → wasm-pack package, published to npm as
+  `@rusenbb/vaultdb`.
 
-See each binding's `RELEASE.md` for the build + publish steps.
+### PyPI publish (vaultdb-pyo3 → `vaultdb`)
+
+```bash
+# Prereqs: pipx install maturin (or pip install --user maturin),
+# plus a PyPI API token at ~/.pypirc or via MATURIN_PYPI_TOKEN.
+
+cd bindings/vaultdb-pyo3
+
+# Build a stable-ABI wheel (one wheel covers CPython 3.9+).
+maturin build --release --strip
+
+# Build sdist too so pip can fall back when no wheel matches.
+maturin sdist
+
+# Publish both. `--skip-existing` is harmless and lets you re-run
+# the command after a partial failure.
+maturin publish --skip-existing
+```
+
+For multi-platform wheels (Linux x86_64 + aarch64, macOS
+x86_64 + arm64, Windows x86_64), run `maturin build` inside each
+target's CI runner. The release workflow under `.github/workflows`
+in eduport's repo serves as a reference.
+
+### npm publish (vaultdb-wasm → `@rusenbb/vaultdb`)
+
+```bash
+# Prereqs: cargo install wasm-pack, plus `npm login` (the npm
+# token must have publish access to the @rusenbb scope).
+
+cd bindings/vaultdb-wasm
+wasm-pack build --target bundler --release --scope rusenbb
+
+# wasm-pack writes a publish-ready package under pkg/. Inspect it
+# before publishing — particularly the package.json's `name`
+# field (should be `@rusenbb/vaultdb`).
+cat pkg/package.json | jq .name
+
+# Publish to npm.
+cd pkg
+npm publish --access public
+```
+
+### Verifying after publish
+
+- <https://pypi.org/project/vaultdb/>
+- <https://www.npmjs.com/package/@rusenbb/vaultdb>
+
+Each page should show v1.0.0 with the README rendered. A trial
+install in a clean venv / npm scratch project is a good final
+sanity check.

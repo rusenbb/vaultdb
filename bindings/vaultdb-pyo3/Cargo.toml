@@ -1,0 +1,33 @@
+[package]
+name = "vaultdb-pyo3"
+description = "Python bindings for vaultdb-core (built with PyO3 + maturin)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["python", "obsidian", "markdown", "vaultdb", "pyo3"]
+categories = ["api-bindings", "database"]
+
+# `cdylib` is what `maturin` packages into a Python wheel — the
+# resulting `.so` / `.pyd` / `.dylib` is loaded by CPython at
+# `import vaultdb` time. We also expose `rlib` so other Rust
+# crates in this workspace can pull the binding crate in for unit
+# tests without going through Python.
+[lib]
+name = "vaultdb"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vaultdb-core = { path = "../../crates/vaultdb-core", version = "1.0.0" }
+# `extension-module` tells PyO3 to skip the Python startup library
+# at link time — required for wheels distributed via PyPI.
+# `abi3-py39` builds a stable-ABI wheel that works on CPython 3.9+.
+pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[package.metadata.maturin]
+# `python-source` is unset because everything Python-callable is
+# generated from the Rust `#[pymodule]`. Wheel filename / package
+# name are driven by the `[lib].name` above and pyproject.toml.
