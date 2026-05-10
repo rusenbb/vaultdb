@@ -109,6 +109,9 @@ Every record automatically has virtual fields:
 | `_link_count` | Number of outgoing links |
 | `_backlinks` | Notes that link to this note |
 | `_backlink_count` | Number of incoming links |
+| `_body` | The full body text (everything after the closing `---` of the frontmatter) — use with `contains`, `matches`, etc. for body search |
+| `_length` | Total file size in bytes |
+| `_body_length` | Body length in bytes (excluding frontmatter) |
 
 ## Commands
 
@@ -145,6 +148,10 @@ FIELD !contains VALUE    # negated
 FIELD startswith VALUE
 FIELD endswith VALUE
 FIELD matches REGEX      # regex match
+FIELD IN (a, b, c)       # SQL-style list membership
+FIELD NOT IN (a, b, c)   # negated
+FIELD IS NULL            # alias for `missing`
+FIELD IS NOT NULL        # alias for `exists`
 FIELD exists             # field is present and non-null
 FIELD missing            # field is absent or null
 FIELD !exists            # negated exists (same as missing)
@@ -153,23 +160,49 @@ FIELD !exists            # negated exists (same as missing)
 Boolean composition inside a single `--where`:
 
 ```bash
-# AND with &&  (binds looser than ||)
+# AND with && (SQL-conventional: binds tighter than ||)
 --where "tags contains topic/ai && status = active"
 
 # OR with ||
 --where "status = active || status = pending"
 
-# Mixed: parses as (a || b) AND c
+# Mixed: AND binds tighter, so a || b && c parses as a || (b && c)
 --where "status = draft || status = active && hsk = 1"
+
+# Parenthesised grouping for explicit precedence
+--where "(status = draft || status = active) && hsk = 1"
+
+# Word-prefix NOT for negating a whole sub-expression
+--where "NOT (status = archived || status = deleted)"
+
+# Quoted string values for needles with spaces or special chars
+--where 'title = "Two-word title"'
+--where "status IN (\"in review\", \"needs follow-up\")"
 ```
 
-Multiple `--where` flags are also AND-ed (handy when one of the conjuncts contains `||` and you want to keep the grouping clean):
+Multiple `--where` flags are also AND-ed:
 
 ```bash
 --where "status = active || status = pending" --where "tags contains topic/ai"
 ```
 
-There are no parentheses in the DSL today; for grouped expressions, build the `Expr` directly via the library API or use multiple `--where` flags.
+### Body search
+
+Use the `_body` virtual field to search inside note bodies (the text after the frontmatter):
+
+```bash
+# Find every note that mentions "Stanford" in its body
+vaultdb query 3-Notes --where '_body contains "Stanford"'
+
+# Combined with frontmatter filtering — runs through the streaming
+# query path, so it's cheap on large vaults.
+vaultdb query 3-Notes --where 'status = active && _body contains "machine learning"'
+
+# Regex on the body
+vaultdb query 3-Notes --where '_body matches "^# Conclusion"'
+```
+
+Body content is loaded only when a body predicate is referenced; queries that don't need it stay on the fast frontmatter-only path.
 
 ### Create
 

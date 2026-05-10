@@ -76,6 +76,20 @@ impl Record {
                     .unwrap_or(content.trim().len());
                 Some(Value::Integer(body_len as i64))
             }
+            "_body" => {
+                // Full body text (everything after the closing `---` of
+                // the frontmatter). Used by body-search predicates such as
+                // `_body contains "search term"` and `_body matches
+                // "^prefix"`. The DSL parser doesn't need to know about
+                // this — it's a normal virtual field that flows through
+                // the existing `Contains` / `Matches` / `StartsWith` /
+                // `EndsWith` predicates.
+                let content = self.load_content();
+                let body = crate::frontmatter::extract_frontmatter(&content)
+                    .map(|(_, body_start)| content[body_start..].to_string())
+                    .unwrap_or(content);
+                Some(Value::String(body))
+            }
             _ => self.fields.get(key).cloned(),
         }
     }

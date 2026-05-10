@@ -306,11 +306,20 @@ impl Vault {
             .filter
             .as_ref()
             .is_some_and(crate::filter::expr_uses_links);
+        // Body-content predicates (e.g. `_body contains "foo"`) need
+        // raw_content loaded but DON'T need the link graph. We track
+        // them separately so streaming with body predicates still works
+        // — only the load function changes per file.
+        let needs_body_content = q
+            .filter
+            .as_ref()
+            .is_some_and(crate::filter::expr_needs_body_content);
 
         // Pure-streaming path: no sort, no graph predicates. We iterate
         // file paths lazily, load each record on demand, filter, and
-        // yield. No upfront load_records call, so vault size doesn't
-        // affect memory.
+        // yield. Body predicates are fine here — we just call
+        // load_record_with_content per file when needed. Vault size
+        // doesn't affect resident memory.
         if !needs_links && q.sort.is_none() {
             let paths = self.list_files(&folder_path, q.recursive)?;
             let select_set: Option<std::collections::BTreeSet<String>> = q
@@ -325,6 +334,7 @@ impl Vault {
                     vault_root: self.root.clone(),
                     limit: q.limit,
                     yielded: 0,
+                    needs_content: needs_body_content,
                 }),
             });
         }
@@ -333,7 +343,7 @@ impl Vault {
         // (with top-K when both are present and limit < total) and
         // project. This degrades gracefully into the same behaviour as
         // the previous eager implementation.
-        let load = if needs_links {
+        let load = if needs_links || needs_body_content {
             self.load_records_with_content(&folder_path, q.recursive, false)?
         } else {
             self.load_records(&folder_path, q.recursive, false)?
@@ -403,6 +413,10 @@ struct StreamingState {
     vault_root: PathBuf,
     limit: Option<usize>,
     yielded: usize,
+    /// When true, each file is loaded with body content (raw_content
+    /// populated) so body-search predicates can run. Otherwise we use
+    /// the cheaper frontmatter-only load.
+    needs_content: bool,
 }
 
 impl Iterator for QueryIter {
@@ -427,13 +441,29 @@ impl StreamingState {
         }
         loop {
             let path = self.paths.next()?;
-            let record = match crate::frontmatter::load_record(&path) {
+            let load_result = if self.needs_content {
+                crate::frontmatter::load_record_with_content(&path)
+            } else {
+                crate::frontmatter::load_record(&path)
+            };
+            let record = match load_result {
                 Ok(r) => r,
-                Err(VaultdbError::NoFrontmatter(_)) => Record {
-                    path: path.clone(),
-                    fields: std::collections::BTreeMap::new(),
-                    raw_content: None,
-                },
+                Err(VaultdbError::NoFrontmatter(_)) => {
+                    // No frontmatter: yield an empty-fields record. If
+                    // body content was requested, populate raw_content
+                    // by reading the file directly so body predicates
+                    // can still run.
+                    let raw_content = if self.needs_content {
+                        std::fs::read_to_string(&path).ok()
+                    } else {
+                        None
+                    };
+                    Record {
+                        path: path.clone(),
+                        fields: std::collections::BTreeMap::new(),
+                        raw_content,
+                    }
+                }
                 Err(VaultdbError::InvalidFrontmatter { .. }) => {
                     // Skip files with malformed YAML — same behaviour
                     // as the eager load. Eduport-core / CLI consumers
@@ -1135,6 +1165,196 @@ mod tests {
                 b.fields.keys().collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn query_iter_body_contains_finds_records_by_body_text() {
+        // `_body contains "needle"` is the body-search predicate.
+        // Records whose body (the file content after the frontmatter)
+        // contains the needle should match. Frontmatter content does
+        // NOT count.
+        use crate::query::{Expr, Predicate, Query};
+        use crate::record::Value;
+        use std::fs;
+
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+
+        // a.md: matches in body
+        fs::write(
+            dir.path().join("notes/a.md"),
+            "---\nstatus: active\n---\nThis note discusses microservices.\n",
+        )
+        .unwrap();
+        // b.md: needle appears in frontmatter, NOT body
+        fs::write(
+            dir.path().join("notes/b.md"),
+            "---\ntags:\n  - microservices\n---\nNothing relevant.\n",
+        )
+        .unwrap();
+        // c.md: doesn't match anywhere
+        fs::write(
+            dir.path().join("notes/c.md"),
+            "---\nstatus: draft\n---\nIrrelevant text.\n",
+        )
+        .unwrap();
+
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::Predicate(Predicate::Contains {
+                field: "_body".into(),
+                value: Value::String("microservices".into()),
+            })),
+            select: None,
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+
+        let records: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(
+            records.len(),
+            1,
+            "only a.md has 'microservices' in its body, got: {:?}",
+            records.iter().map(|r| r.virtual_name()).collect::<Vec<_>>()
+        );
+        assert_eq!(records[0].virtual_name(), "a");
+    }
+
+    #[test]
+    fn query_iter_body_matches_runs_regex_on_body_text() {
+        use crate::query::{Expr, Predicate, Query};
+        use std::fs;
+
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/intro.md"),
+            "---\nstatus: active\n---\n# Introduction\n\nThis is the intro.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes/no_heading.md"),
+            "---\nstatus: active\n---\nJust text, no heading.\n",
+        )
+        .unwrap();
+
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        // Match files whose body starts with a level-1 heading.
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(Expr::Predicate(Predicate::Matches {
+                field: "_body".into(),
+                regex: r"^\s*# ".into(),
+            })),
+            select: None,
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+        let records: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].virtual_name(), "intro");
+    }
+
+    #[test]
+    fn body_search_works_via_dsl_with_quoted_needle() {
+        // End-to-end: parse a where-DSL string that uses _body, run
+        // through query_iter, verify the right records come out.
+        use crate::query::{Expr, Query};
+        use std::fs;
+
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/match.md"),
+            "---\nstatus: active\n---\nApplied to Stanford last week.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes/skip.md"),
+            "---\nstatus: active\n---\nApplied to MIT.\n",
+        )
+        .unwrap();
+
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let filter = Expr::parse(r#"_body contains "Stanford""#).unwrap();
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(filter),
+            select: None,
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+        let records: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].virtual_name(), "match");
+    }
+
+    #[test]
+    fn body_search_combines_with_frontmatter_and_uses_streaming_path() {
+        // `status = active && _body contains "Stanford"` is exactly
+        // the kind of query eduport's command palette will use. It
+        // doesn't reference the link graph, so it should still go
+        // through the streaming path (just with content loaded).
+        use crate::query::{Expr, Query};
+        use std::fs;
+
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/active_match.md"),
+            "---\nstatus: active\n---\nApplied to Stanford.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes/draft_match.md"),
+            "---\nstatus: draft\n---\nApplied to Stanford.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes/active_no_match.md"),
+            "---\nstatus: active\n---\nApplied to MIT.\n",
+        )
+        .unwrap();
+
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let filter = Expr::parse(r#"status = active && _body contains "Stanford""#).unwrap();
+        let q = Query {
+            folder: "notes".into(),
+            filter: Some(filter),
+            select: None,
+            sort: None,
+            limit: None,
+            recursive: false,
+        };
+        let records: Vec<_> = vault
+            .query_iter(&q)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].virtual_name(), "active_match");
     }
 
     #[test]

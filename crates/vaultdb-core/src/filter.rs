@@ -407,8 +407,44 @@ pub fn expr_uses_links(expr: &crate::query::Expr) -> bool {
 
 /// Returns true if a leaf predicate references a graph virtual field.
 fn predicate_uses_links(p: &crate::query::Predicate) -> bool {
+    GRAPH_VIRTUAL_FIELDS.contains(&predicate_field(p))
+}
+
+/// Body / content virtual fields whose evaluation requires the file's
+/// raw_content to be loaded. Used by `expr_needs_body_content` so that
+/// `Vault::query` and `Vault::query_iter` know to call
+/// `load_record_with_content` instead of the cheaper `load_record`.
+///
+/// Note: `_length` and `_body_length` already work even without
+/// raw_content loaded (they re-read from disk on each access), but
+/// loading once upfront is a meaningful win for queries that touch
+/// these on every record.
+pub const BODY_VIRTUAL_FIELDS: &[&str] = &["_body", "_length", "_body_length"];
+
+/// Returns true if any node of `expr` references a body virtual field
+/// or a graph predicate. Both cases need raw_content loaded — graph
+/// predicates because they extract wikilinks, body predicates because
+/// they read the body text directly.
+pub fn expr_needs_body_content(expr: &crate::query::Expr) -> bool {
+    use crate::query::Expr;
+    match expr {
+        Expr::LinksTo(_) | Expr::LinkedFrom(_) => true,
+        Expr::Predicate(p) => predicate_uses_body_content(p),
+        Expr::And(es) | Expr::Or(es) => es.iter().any(expr_needs_body_content),
+        Expr::Not(e) => expr_needs_body_content(e),
+    }
+}
+
+fn predicate_uses_body_content(p: &crate::query::Predicate) -> bool {
+    let field = predicate_field(p);
+    BODY_VIRTUAL_FIELDS.contains(&field) || GRAPH_VIRTUAL_FIELDS.contains(&field)
+}
+
+/// Extract the field name from any predicate variant. Centralised so
+/// the predicate-uses-X helpers can share the destructuring.
+fn predicate_field(p: &crate::query::Predicate) -> &str {
     use crate::query::Predicate;
-    let field = match p {
+    match p {
         Predicate::Equals { field, .. }
         | Predicate::Contains { field, .. }
         | Predicate::Compare { field, .. }
@@ -416,9 +452,8 @@ fn predicate_uses_links(p: &crate::query::Predicate) -> bool {
         | Predicate::StartsWith { field, .. }
         | Predicate::EndsWith { field, .. }
         | Predicate::Exists { field }
-        | Predicate::Missing { field } => field,
-    };
-    GRAPH_VIRTUAL_FIELDS.contains(&field.as_str())
+        | Predicate::Missing { field } => field.as_str(),
+    }
 }
 
 /// Evaluate an `Expr` against a single record.

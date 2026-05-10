@@ -5,7 +5,42 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added — pest-driven where-DSL parser (Phase B item 1)
+## [0.4.0] — Query layer evolution
+
+Phase B of the SQLite-of-markdown roadmap: a real DSL parser, a
+streaming query API, and body-search predicates. The headline shape:
+queries now scale gracefully past tens of thousands of records, the
+DSL supports SQL-shaped expressions including parens and quoted
+strings, and `_body contains "needle"` finds notes by their body
+content.
+
+### Added — body-search predicates (Phase B item 3)
+
+- New `_body` virtual field on `Record::get_with_links` returning the
+  full body text (everything after the closing `---` of the
+  frontmatter). Works with all the existing operators:
+  - `_body contains "search term"` — substring search
+  - `_body matches "^# "` — regex search
+  - `_body !contains "stale"` — negated substring
+  - `_body startswith` / `_body endswith` — prefix/suffix anchors
+- Body-search predicates are recognized by `expr_needs_body_content`,
+  so the streaming query path automatically loads each record's
+  raw_content when a body predicate is present and skips the load
+  when none is needed.
+- New `pub const BODY_VIRTUAL_FIELDS = ["_body", "_length",
+  "_body_length"]` mirrors `GRAPH_VIRTUAL_FIELDS` and exposes the
+  canonical list to consumers.
+
+### Added — streaming query API (Phase B item 2)
+
+- New `Vault::query_iter(&Query) -> Result<QueryIter>` returns an
+  iterator over `Result<Record>` instead of materialising a Vec.
+- Tiered implementation: pure file-by-file streaming when no sort
+  and no graph predicates (O(1) memory regardless of vault size);
+  bounded-heap top-K when sort + limit are both set with limit < N
+  (O(limit) memory); buffered fallback for graph predicates and
+  sort-without-limit (same cost as the eager path).
+- `Vault::query` is now a thin wrapper over `query_iter().collect()`.
 
 - **Real parser at `crate::dsl`** powered by `pest`. The grammar lives
   at `src/where_dsl.pest` and is the single source of truth.
