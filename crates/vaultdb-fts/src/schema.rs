@@ -8,8 +8,17 @@ use rusqlite::Connection;
 use super::Result;
 
 /// Bumped whenever the on-disk schema changes shape. A mismatch with
-/// `PRAGMA user_version` triggers a full FTS5 rebuild.
-pub const FTS_SCHEMA_VERSION: i64 = 1;
+/// `PRAGMA user_version` triggers a full rebuild of both `entities`
+/// and `entities_fts` from vault state.
+///
+/// History
+/// - **1**: initial release.
+/// - **2**: dropped legacy `entities.type` / `entities.body` /
+///   `entities.frontmatter` columns inherited from eduport's
+///   pre-extraction schema. Legacy databases upgrade by full rebuild
+///   (the index is a derived cache; rebuilds are sub-second at
+///   target vault sizes).
+pub const FTS_SCHEMA_VERSION: i64 = 2;
 
 const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS entities (
@@ -48,7 +57,15 @@ pub fn init_schema(conn: &Connection) -> Result<InitOutcome> {
 
     let mut fts_rebuilt = false;
     if current_version != 0 && current_version != FTS_SCHEMA_VERSION {
+        // Legacy schemas (e.g. eduport's pre-extraction version that
+        // carried `entities.type`/`body`/`frontmatter` NOT NULL
+        // columns) need a full rebuild — the new code doesn't write
+        // those columns, so retaining the table would NOT-NULL-crash
+        // on first upsert. Both `entities` and `entities_fts` get
+        // dropped here; the caller (consumer) re-populates via
+        // `reconcile`.
         conn.execute("DROP TABLE IF EXISTS entities_fts", [])?;
+        conn.execute("DROP TABLE IF EXISTS entities", [])?;
         fts_rebuilt = true;
     }
 
