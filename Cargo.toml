@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/vaultdb-core",
+    "crates/vaultdb-fts",
     "crates/vaultdb",
     "crates/vaultdb-mcp",
     "bindings/vaultdb-pyo3",

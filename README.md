@@ -323,13 +323,20 @@ vaultdb schema show 3-Notes
 
 ## Performance
 
-No caching, no indexing — reads files fresh on every command. Numbers below are best-of-3 from `cargo run --release --example bench -- <N>` against synthetic notes (status alternating, ~3 wikilinks each), measured on a Linux laptop:
+No caching, no indexing — reads files fresh on every command.
+Numbers below are best-of-3 from `cargo run --release --example bench -- <N>`,
+measured on an Intel i7-14700K desktop (full host details and
+methodology in **[BENCHMARKS.md](BENCHMARKS.md)**):
 
-| Scale | Frontmatter query | Graph query (filter touches `_link_count`) | `link_graph(All)` build |
-|-------|------------------|---------------------------------------------|------------------------|
-| 1K notes  | ~5ms   | ~6ms   | ~6ms   |
-| 10K notes | ~55ms  | ~75ms  | ~70ms  |
-| 50K notes | ~285ms | ~420ms | ~370ms |
+| Scale       | Frontmatter query | Graph query | `link_graph(All)` |
+|-------------|------------------:|------------:|------------------:|
+| 1 000 notes  |    5 ms |    7 ms |    6 ms |
+| 10 000 notes |   59 ms |   88 ms |   70 ms |
+| 100 000 notes |  651 ms | 1 032 ms |  819 ms |
+
+Scaling is roughly linear in vault size — 10× the records costs
+about 10–12× the time, with no superlinear cliff up through 100k.
+Every operation finishes in **under 1.1 seconds at 100k notes**.
 
 Reproduce with:
 

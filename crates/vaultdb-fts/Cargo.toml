@@ -1,0 +1,19 @@
+[package]
+name = "vaultdb-fts"
+description = "Opt-in full-text search index for vaults — SQLite + FTS5 over vaultdb-core records"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["vaultdb", "fts5", "search", "markdown", "sqlite"]
+categories = ["database", "text-processing"]
+
+[dependencies]
+vaultdb-core = { path = "../vaultdb-core", version = "1.0.0" }
+rusqlite = { version = "0.32", features = ["bundled", "modern_sqlite"] }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
