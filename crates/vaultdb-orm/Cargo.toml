@@ -1,0 +1,21 @@
+[package]
+name = "vaultdb-orm"
+description = "Typed model layer over vaultdb-core — declare a struct, query it like a database row"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["vaultdb", "orm", "markdown", "obsidian", "database"]
+categories = ["database", "data-structures"]
+
+[dependencies]
+vaultdb-core = { path = "../vaultdb-core", version = "1.0.0" }
+vaultdb-orm-macros = { path = "../vaultdb-orm-macros", version = "1.0.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

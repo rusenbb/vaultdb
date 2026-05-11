@@ -9,6 +9,7 @@ use std::time::SystemTime;
 /// A value from YAML frontmatter, preserving type information.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum Value {
     Null,
     String(String),
@@ -17,6 +18,57 @@ pub enum Value {
     Bool(bool),
     List(Vec<Value>),
     Map(BTreeMap<String, Value>),
+}
+
+// Ergonomic `From` impls so callers building predicates programmatically
+// (notably `vaultdb-orm`'s typed field accessors) can write `.eq(2024)`
+// or `.contains("topic/ai")` and have it produce the right `Value`
+// variant without an explicit constructor.
+
+impl From<&str> for Value {
+    fn from(v: &str) -> Self {
+        Value::String(v.to_string())
+    }
+}
+impl From<String> for Value {
+    fn from(v: String) -> Self {
+        Value::String(v)
+    }
+}
+impl From<bool> for Value {
+    fn from(v: bool) -> Self {
+        Value::Bool(v)
+    }
+}
+impl From<i32> for Value {
+    fn from(v: i32) -> Self {
+        Value::Integer(v as i64)
+    }
+}
+impl From<i64> for Value {
+    fn from(v: i64) -> Self {
+        Value::Integer(v)
+    }
+}
+impl From<u32> for Value {
+    fn from(v: u32) -> Self {
+        Value::Integer(v as i64)
+    }
+}
+impl From<f32> for Value {
+    fn from(v: f32) -> Self {
+        Value::Float(v as f64)
+    }
+}
+impl From<f64> for Value {
+    fn from(v: f64) -> Self {
+        Value::Float(v)
+    }
+}
+impl<T: Into<Value>> From<Vec<T>> for Value {
+    fn from(v: Vec<T>) -> Self {
+        Value::List(v.into_iter().map(Into::into).collect())
+    }
 }
 
 /// One parsed .md file = one record.

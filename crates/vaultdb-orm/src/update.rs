@@ -1,0 +1,72 @@
+//! [`Update`]: a typed wrapper around `vaultdb_core::UpdateBuilder`.
+//!
+//! Reached from a `Query<T>` by calling `.update()`. Carries the
+//! query's filter (which must include at least one user-added
+//! `.filter(...)`, not only the model discriminator) and exposes
+//! `.set(FieldRef, value)`, `.unset(FieldRef)`, `.add_tag`,
+//! `.remove_tag`, and the plan/execute pair the underlying core API
+//! provides.
+//!
+//! Like the core builder, mutations only happen on `.execute(...)`;
+//! `.plan(...)` returns a read-only [`MutationReport`] preview.
+
+use std::marker::PhantomData;
+
+use vaultdb_core::{Expr, MutationReport, UpdateBuilder as CoreUpdateBuilder, Value, Vault};
+
+use crate::error::Result;
+use crate::field::FieldRef;
+use crate::note::Note;
+
+pub struct Update<'v, T: Note> {
+    vault: &'v Vault,
+    inner: CoreUpdateBuilder,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<'v, T: Note> Update<'v, T> {
+    /// Internal constructor. Use [`crate::Query::update`].
+    pub(crate) fn new(vault: &'v Vault, filter: Expr) -> Self {
+        Self {
+            vault,
+            inner: CoreUpdateBuilder::new(T::FOLDER, filter),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Set `field` to `value` for every matching record.
+    pub fn set(mut self, field: FieldRef, value: impl Into<Value>) -> Self {
+        self.inner = self.inner.set(field.name(), value.into());
+        self
+    }
+
+    /// Remove `field` from every matching record.
+    pub fn unset(mut self, field: FieldRef) -> Self {
+        self.inner = self.inner.unset(field.name());
+        self
+    }
+
+    /// Add `tag` to the `tags` list of every matching record.
+    pub fn add_tag(mut self, tag: impl Into<String>) -> Self {
+        self.inner = self.inner.add_tag(tag);
+        self
+    }
+
+    /// Remove `tag` from the `tags` list of every matching record.
+    pub fn remove_tag(mut self, tag: impl Into<String>) -> Self {
+        self.inner = self.inner.remove_tag(tag);
+        self
+    }
+
+    /// Preview the mutation without writing. Returns the same
+    /// `MutationReport` shape `execute()` produces.
+    pub fn plan(&self) -> Result<MutationReport> {
+        Ok(self.inner.plan(self.vault)?)
+    }
+
+    /// Execute the mutation, writing the resulting files atomically
+    /// (one tempfile-then-rename per affected record).
+    pub fn execute(self) -> Result<MutationReport> {
+        Ok(self.inner.execute(self.vault)?)
+    }
+}

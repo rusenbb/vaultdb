@@ -157,6 +157,10 @@ fn field_value_to_json(val: &Value) -> serde_json::Value {
                 .collect();
             serde_json::Value::Object(obj)
         }
+        // `Value` is `#[non_exhaustive]` — future variants render as null
+        // until this match learns them. Bump the CLI alongside any
+        // `vaultdb-core` `Value` addition.
+        _ => serde_json::Value::Null,
     }
 }
 

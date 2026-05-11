@@ -12,6 +12,7 @@ use crate::record::Value;
 
 /// A composable filter expression. The AST root for vault queries.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Expr {
     /// A frontmatter or virtual-field predicate.
     Predicate(Predicate),
@@ -29,6 +30,7 @@ pub enum Expr {
 
 /// A leaf predicate over a record's frontmatter or virtual fields.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Predicate {
     Equals {
         field: String,
@@ -65,6 +67,7 @@ pub enum Predicate {
 
 /// A scalar comparison operator (used by `Predicate::Compare`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum CompareOp {
     Lt,
     Le,
@@ -78,6 +81,7 @@ pub enum CompareOp {
 /// joins-via-links possible (e.g., "give me all notes that link to anything
 /// tagged `topic/ai`").
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum LinkPredicate {
     Target(String),
     Where(Box<Expr>),
@@ -121,6 +125,66 @@ impl FromStr for Expr {
         // for the grammar; precedence is SQL-conventional (AND tighter
         // than OR).
         crate::dsl::parse(input)
+    }
+}
+
+// Operator overloads for ergonomic programmatic construction.
+//
+// `a & b`, `a | b`, and `!a` build the corresponding AST nodes. Chains
+// of the same operator are flattened (`a & b & c` produces a single
+// three-element `And`, not nested two-element ones), so the resulting
+// expression mirrors what a hand-written `Expr::And(vec![...])` would.
+
+impl std::ops::BitAnd for Expr {
+    type Output = Expr;
+    fn bitand(self, rhs: Expr) -> Expr {
+        match (self, rhs) {
+            (Expr::And(mut a), Expr::And(b)) => {
+                a.extend(b);
+                Expr::And(a)
+            }
+            (Expr::And(mut a), other) => {
+                a.push(other);
+                Expr::And(a)
+            }
+            (other, Expr::And(mut b)) => {
+                b.insert(0, other);
+                Expr::And(b)
+            }
+            (a, b) => Expr::And(vec![a, b]),
+        }
+    }
+}
+
+impl std::ops::BitOr for Expr {
+    type Output = Expr;
+    fn bitor(self, rhs: Expr) -> Expr {
+        match (self, rhs) {
+            (Expr::Or(mut a), Expr::Or(b)) => {
+                a.extend(b);
+                Expr::Or(a)
+            }
+            (Expr::Or(mut a), other) => {
+                a.push(other);
+                Expr::Or(a)
+            }
+            (other, Expr::Or(mut b)) => {
+                b.insert(0, other);
+                Expr::Or(b)
+            }
+            (a, b) => Expr::Or(vec![a, b]),
+        }
+    }
+}
+
+impl std::ops::Not for Expr {
+    type Output = Expr;
+    fn not(self) -> Expr {
+        match self {
+            // Double negation cancels.
+            Expr::Not(inner) => *inner,
+            other => Expr::Not(Box::new(other)),
+        }
     }
 }
 
@@ -201,5 +265,73 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         // Untagged enum representation
         assert!(json.contains("Foo"));
+    }
+
+    fn p_eq(field: &str, v: Value) -> Expr {
+        Expr::Predicate(Predicate::Equals {
+            field: field.into(),
+            value: v,
+        })
+    }
+
+    #[test]
+    fn bitand_flattens_chains() {
+        let a = p_eq("a", Value::Integer(1));
+        let b = p_eq("b", Value::Integer(2));
+        let c = p_eq("c", Value::Integer(3));
+        let combined = a & b & c;
+        match combined {
+            Expr::And(parts) => assert_eq!(parts.len(), 3),
+            other => panic!("expected flattened And, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bitor_flattens_chains() {
+        let a = p_eq("a", Value::Integer(1));
+        let b = p_eq("b", Value::Integer(2));
+        let c = p_eq("c", Value::Integer(3));
+        let combined = a | b | c;
+        match combined {
+            Expr::Or(parts) => assert_eq!(parts.len(), 3),
+            other => panic!("expected flattened Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn not_double_negation_cancels() {
+        let a = p_eq("a", Value::Integer(1));
+        let twice = !!a.clone();
+        assert_eq!(a, twice);
+    }
+
+    #[test]
+    fn mixed_operators_respect_precedence() {
+        let a = p_eq("a", Value::Integer(1));
+        let b = p_eq("b", Value::Integer(2));
+        let c = p_eq("c", Value::Integer(3));
+        // & binds tighter than |, so `a | b & c` is `a | (b & c)`.
+        let combined = a.clone() | b.clone() & c.clone();
+        match combined {
+            Expr::Or(parts) if parts.len() == 2 => {
+                assert_eq!(parts[0], a);
+                assert!(matches!(&parts[1], Expr::And(inner) if inner.len() == 2));
+            }
+            other => panic!("expected Or-of-(a, And(b,c)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn value_from_primitives() {
+        assert_eq!(Value::from(42_i32), Value::Integer(42));
+        assert_eq!(Value::from(2_500_000_000_i64), Value::Integer(2_500_000_000));
+        assert_eq!(Value::from(3.14_f64), Value::Float(3.14));
+        assert_eq!(Value::from(true), Value::Bool(true));
+        assert_eq!(Value::from("hi"), Value::String("hi".into()));
+        assert_eq!(Value::from(String::from("hi")), Value::String("hi".into()));
+        assert_eq!(
+            Value::from(vec!["a", "b"]),
+            Value::List(vec![Value::String("a".into()), Value::String("b".into())])
+        );
     }
 }

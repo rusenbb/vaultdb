@@ -1,0 +1,71 @@
+//! The [`Note`] trait — the contract a typed model implements (or has
+//! generated via `#[derive(Note)]`) to be queryable through `vaultdb-orm`.
+
+use std::path::Path;
+
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value as JsonValue;
+use vaultdb_core::{Expr, Record};
+
+use crate::error::{OrmError, Result};
+use crate::value::value_to_json;
+
+/// A typed view onto a vault record.
+///
+/// Implementors declare:
+/// - which folder their records live in ([`Note::FOLDER`]),
+/// - an optional discriminator filter applied to every query
+///   ([`Note::discriminator`]),
+/// - how to materialise an instance from a [`Record`]
+///   ([`Note::from_record`]) — a default implementation drives this
+///   through serde, which is what `#[derive(Note)]` relies on.
+pub trait Note: Sized + Serialize + DeserializeOwned {
+    /// The folder, relative to the vault root, that holds records of
+    /// this type.
+    const FOLDER: &'static str;
+
+    /// An optional filter applied implicitly to every query of this
+    /// type. The natural place to discriminate when many record kinds
+    /// share a folder (e.g. `tags contains type/paper`).
+    ///
+    /// Default: no discriminator.
+    fn discriminator() -> Option<Expr> {
+        None
+    }
+
+    /// Parse a [`Record`] into `Self`.
+    ///
+    /// The default implementation builds a JSON object out of the
+    /// record's frontmatter plus the cheap path-derived virtual fields
+    /// (`_name`, `_path`, `_folder`, `_modified`, `_created`) and feeds
+    /// it to `serde_json::from_value`. Models can use `#[serde(rename
+    /// = "_name")]` to map a typed field onto a virtual one without
+    /// overriding this method.
+    fn from_record(record: &Record, vault_root: &Path) -> Result<Self> {
+        let json = record_to_json(record, vault_root);
+        serde_json::from_value(json).map_err(OrmError::Deserialize)
+    }
+}
+
+/// Build a JSON object from a record's frontmatter plus cheap virtual
+/// fields. Exposed publicly because hand-written `from_record`
+/// overrides often want to start from the same shape.
+pub fn record_to_json(record: &Record, vault_root: &Path) -> JsonValue {
+    let mut obj = serde_json::Map::new();
+
+    for (k, v) in &record.fields {
+        obj.insert(k.clone(), value_to_json(v));
+    }
+
+    // Cheap virtuals — always computable from path / fs metadata.
+    // Accessed via Record::get so virtual_modified / virtual_created (which
+    // are private on Record) flow through the public API.
+    for key in ["_name", "_path", "_folder", "_modified", "_created"] {
+        if let Some(v) = record.get(key, vault_root) {
+            obj.insert(key.to_string(), value_to_json(&v));
+        }
+    }
+
+    JsonValue::Object(obj)
+}

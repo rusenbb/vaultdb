@@ -16,6 +16,7 @@ pub struct ParseError {
 }
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum VaultdbError {
     #[error("vault not found: no .obsidian/ directory in {0} or any parent")]
     VaultNotFound(String),
