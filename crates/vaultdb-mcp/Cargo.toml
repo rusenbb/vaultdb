@@ -20,7 +20,7 @@ path = "src/main.rs"
 # Required by crates.io: every dependency of a published crate must
 # declare a version requirement. The `xlsx` feature is enabled so
 # `export: "foo.xlsx"` works for any read tool.
-vaultdb-core = { path = "../vaultdb-core", version = "1.2.0", features = ["xlsx"] }
+vaultdb-core = { path = "../vaultdb-core", version = "1.2.1", features = ["xlsx"] }
 rmcp = { version = "1.6", features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
 serde.workspace = true

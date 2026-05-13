@@ -18,7 +18,7 @@ path = "src/main.rs"
 # `version`. Required for publishing the CLI alongside the library. The
 # `xlsx` feature is enabled so `vaultdb query --output foo.xlsx` works
 # out of the box.
-vaultdb-core = { path = "../vaultdb-core", version = "1.2.0", features = ["xlsx"] }
+vaultdb-core = { path = "../vaultdb-core", version = "1.2.1", features = ["xlsx"] }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

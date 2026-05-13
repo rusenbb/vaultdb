@@ -10,8 +10,8 @@ keywords = ["vaultdb", "orm", "markdown", "obsidian", "database"]
 categories = ["database", "data-structures"]
 
 [dependencies]
-vaultdb-core = { path = "../vaultdb-core", version = "1.2.0" }
-vaultdb-orm-macros = { path = "../vaultdb-orm-macros", version = "1.2.0" }
+vaultdb-core = { path = "../vaultdb-core", version = "1.2.1" }
+vaultdb-orm-macros = { path = "../vaultdb-orm-macros", version = "1.2.1" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

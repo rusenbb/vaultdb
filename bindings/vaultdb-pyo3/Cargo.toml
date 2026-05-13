@@ -19,7 +19,7 @@ name = "vaultdb"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-vaultdb-core = { path = "../../crates/vaultdb-core", version = "1.2.0" }
+vaultdb-core = { path = "../../crates/vaultdb-core", version = "1.2.1" }
 # `extension-module` tells PyO3 to skip the Python startup library
 # at link time — required for wheels distributed via PyPI.
 # `abi3-py39` builds a stable-ABI wheel that works on CPython 3.9+.

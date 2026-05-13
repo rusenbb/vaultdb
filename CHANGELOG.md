@@ -5,6 +5,46 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.1] — Typed list/map writes round-trip as block-style YAML
+
+### Fixed
+
+- `UpdateBuilder::set(field, Value::List(_))` and `Value::Map(_)` used to
+  flatten the typed value through `mutation::render_value_for_yaml`,
+  producing a single-line YAML string (e.g. `"- kedi"`) which the
+  line-oriented `writer::set_field` then wrote as a quoted scalar
+  (`anlamlar: '- kedi'`). The field's typed shape was lost — a subsequent
+  `Vault::query` read back `Value::String("- kedi")` instead of
+  `Value::List([...])`.
+
+  After 1.2.1, lists and maps go through a new
+  `writer::set_field_block` that emits proper block-style YAML across
+  multiple lines. The same flow-style and multiline-scalar refusals as
+  `set_field` are preserved when replacing an existing complex field.
+  Scalars still take the original `set_field` path.
+
+- This affected every typed write path added in 1.1.0:
+  - MCP `plan_update` / `execute_update` with `set_typed` containing
+    lists or maps.
+  - ORM `Create<T>` and `UpdateBuilder` calls in Rust passing
+    `Value::List` / `Value::Map`.
+
+  `CreateBuilder` was unaffected — it renders the whole frontmatter via
+  `serde_yaml::to_string(&fields)`, which already emits block-style YAML
+  for nested collections. The legacy CLI string-set path (`--set
+  field=value`) was also unaffected — it cannot produce a typed list in
+  the first place.
+
+### Tests
+
+- `writer::tests::set_field_block_*` (6 new): insert as block, multi-item
+  round-trip, replace existing block list, map as nested mapping,
+  flow-style refusal, scalar-value guard.
+- `mutation::tests::update_builder_writes_list_as_block_yaml`:
+  end-to-end regression — set a `Value::List` via `UpdateBuilder`,
+  re-read through `Vault::load_records`, assert the field comes back
+  typed as `Value::List`, not flattened.
+
 ## [1.2.0] — Vault-scoped export for CLI and MCP
 
 The headline: every read path can now save its results to a file under
