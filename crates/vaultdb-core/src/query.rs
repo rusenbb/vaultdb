@@ -324,8 +324,11 @@ mod tests {
     #[test]
     fn value_from_primitives() {
         assert_eq!(Value::from(42_i32), Value::Integer(42));
-        assert_eq!(Value::from(2_500_000_000_i64), Value::Integer(2_500_000_000));
-        assert_eq!(Value::from(3.14_f64), Value::Float(3.14));
+        assert_eq!(
+            Value::from(2_500_000_000_i64),
+            Value::Integer(2_500_000_000)
+        );
+        assert_eq!(Value::from(1.5_f64), Value::Float(1.5));
         assert_eq!(Value::from(true), Value::Bool(true));
         assert_eq!(Value::from("hi"), Value::String("hi".into()));
         assert_eq!(Value::from(String::from("hi")), Value::String("hi".into()));

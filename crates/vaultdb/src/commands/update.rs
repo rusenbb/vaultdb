@@ -88,7 +88,7 @@ pub fn run_update(
     let mut builder = UpdateBuilder::new(folder, filter);
     for op in ops {
         builder = match op {
-            UpdateOp::Set { field, value } => builder.set(field, parse_set_value(value)),
+            UpdateOp::Set { field, value } => builder.set(field, Value::parse_scalar(value)),
             UpdateOp::Unset { field } => builder.unset(field),
             UpdateOp::AddTag { tag } => builder.add_tag(tag),
             UpdateOp::RemoveTag { tag } => builder.remove_tag(tag),
@@ -103,19 +103,6 @@ pub fn run_update(
 
     print_report(&report, &vault.root, dry_run, "modified");
     Ok(())
-}
-
-/// Best-effort parse of a CLI `--set` value into a `Value`. Tries integer, then
-/// float, then falls back to a string so the existing CLI's behaviour
-/// (typed values when they look numeric) is preserved.
-fn parse_set_value(s: &str) -> Value {
-    if let Ok(i) = s.parse::<i64>() {
-        return Value::Integer(i);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return Value::Float(f);
-    }
-    Value::String(s.to_string())
 }
 
 /// Format a MutationReport with the existing CLI's colored output style.

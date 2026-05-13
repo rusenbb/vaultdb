@@ -148,16 +148,20 @@ impl UpdateBuilder {
                 continue;
             }
 
-            let mut content = match &record.raw_content {
-                Some(c) => c.clone(),
-                None => {
-                    errors.push(MutationError {
-                        path: record.path.clone(),
-                        message: "record has no raw_content; cannot apply update".into(),
-                    });
-                    continue;
-                }
-            };
+            // `load_records_with_content` (called above) guarantees raw_content
+            // is populated. A None here means the loader's invariant was
+            // violated — surface as Internal so the caller sees a real bug
+            // rather than a per-record "soft" error.
+            let mut content = record
+                .raw_content
+                .as_ref()
+                .ok_or_else(|| {
+                    VaultdbError::Internal(format!(
+                        "record at {} has no raw_content; UpdateBuilder loaded without content",
+                        record.path.display()
+                    ))
+                })?
+                .clone();
             let original_content = content.clone();
             let mut wr_changes = Vec::new();
             let mut description_parts: Vec<String> = Vec::new();

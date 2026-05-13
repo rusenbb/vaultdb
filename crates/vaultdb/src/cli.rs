@@ -251,8 +251,16 @@ pub enum SchemaAction {
     Show { folder: String },
     /// Validate records against schema
     Validate { folder: String },
-    /// Infer schema from existing data
-    Init { folder: String },
+    /// Infer schema from existing data. Prints to stdout by default;
+    /// pass `--write` to merge the inferred collection into
+    /// `<vault>/vaultdb-schema.yaml` (existing collections at the same
+    /// folder are replaced, others preserved).
+    Init {
+        folder: String,
+        /// Save the inferred schema to `<vault>/vaultdb-schema.yaml`.
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 #[derive(Debug, Clone, ValueEnum)]

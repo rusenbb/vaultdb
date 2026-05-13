@@ -110,6 +110,12 @@ pub struct SchemaInferParams {
     /// Walk subfolders recursively (default false).
     #[serde(default)]
     pub recursive: bool,
+    /// Save the inferred collection to `<vault>/vaultdb-schema.yaml`,
+    /// merging with any existing collections (replacing one at the same
+    /// folder key). Default false — by default the tool returns YAML
+    /// for review only.
+    #[serde(default)]
+    pub write: bool,
 }
 
 // ── Plan-only mutation tools ───────────────────────────────────────────────

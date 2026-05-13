@@ -19,6 +19,7 @@ use vaultdb_orm::{Note, Query, Vault};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Note)]
 #[note(folder = "3-Notes", filter = "tags contains type/paper")]
+#[allow(dead_code)] // `cites` / `cited_by` exist as relation-accessor markers
 struct Paper {
     #[serde(rename = "_name")]
     title: String,
@@ -68,7 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n--- papers from 2024 that cite a paper tagged topic/attention ---");
     let combined: Vec<Paper> = Query::<Paper>::new(&vault)
-        .filter(Paper::year().eq(2024) & Paper::cites().any(Paper::tags().contains("topic/attention")))
+        .filter(
+            Paper::year().eq(2024) & Paper::cites().any(Paper::tags().contains("topic/attention")),
+        )
         .fetch()?;
     for p in &combined {
         println!("  {} ({})", p.title, p.year);

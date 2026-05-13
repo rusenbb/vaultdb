@@ -6,10 +6,10 @@
 //!
 //! ```no_run
 //! use serde::{Deserialize, Serialize};
-//! use vaultdb_core::{Expr, Vault};
-//! use vaultdb_orm::{Note, Query};
+//! use vaultdb_orm::{Note, Query, Vault};
 //!
-//! #[derive(Serialize, Deserialize, Debug)]
+//! #[derive(Serialize, Deserialize, Debug, Note)]
+//! #[note(folder = "3-Notes", filter = "tags contains type/paper")]
 //! struct Paper {
 //!     #[serde(rename = "_name")]
 //!     title: String,
@@ -17,20 +17,14 @@
 //!     tags: Vec<String>,
 //! }
 //!
-//! impl Note for Paper {
-//!     const FOLDER: &'static str = "3-Notes";
-//!     fn discriminator() -> Option<Expr> {
-//!         Expr::parse("tags contains type/paper").ok()
-//!     }
-//! }
-//!
 //! let vault = Vault::discover(std::path::Path::new(".")).unwrap();
 //! let papers: Vec<Paper> = Query::<Paper>::new(&vault).fetch().unwrap();
 //! ```
 //!
-//! Phase 2 will add `#[derive(Note)]` so the trait impl is generated
-//! from the struct definition. Phase 3 adds typed field accessors so
-//! filter construction is compile-checked.
+//! `#[derive(Note)]` generates both the `Note` trait impl and one typed
+//! `FieldRef` accessor per struct field (`Paper::year()`,
+//! `Paper::tags()`), so filter construction is compile-checked. See the
+//! `vaultdb-orm-macros` crate for the supported `#[note(...)]` keys.
 
 pub mod error;
 pub mod field;

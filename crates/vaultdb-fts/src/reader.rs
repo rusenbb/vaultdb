@@ -34,7 +34,11 @@ pub fn search(
     // Without a tag filter the SQL LIMIT bounds the work; with one we
     // overscan so the Rust-side intersection has candidates to satisfy
     // `limit` after the filter.
-    let scan_limit = if filter_tags.is_empty() { limit } else { limit * 4 };
+    let scan_limit = if filter_tags.is_empty() {
+        limit
+    } else {
+        limit * 4
+    };
 
     let mut stmt = conn.prepare(
         "SELECT e.file_id, e.name, \
@@ -56,8 +60,7 @@ pub fn search(
     let mut out: Vec<SearchHit> = Vec::new();
     for row in rows {
         let (file_id, name, snippet, row_tags) = row?;
-        let tag_list: Vec<String> =
-            row_tags.split_whitespace().map(String::from).collect();
+        let tag_list: Vec<String> = row_tags.split_whitespace().map(String::from).collect();
         if !required.is_empty() {
             let row_set: HashSet<&str> = row_tags.split_whitespace().collect();
             if !required.iter().all(|t| row_set.contains(t)) {

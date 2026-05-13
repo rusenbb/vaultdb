@@ -2,7 +2,8 @@
 //!
 //! `schema_show` reads `<vault>/vaultdb-schema.yaml` and returns the
 //! parsed schema. `schema_infer` walks a folder and returns the
-//! auto-inferred collection schema as YAML — it does not write to disk.
+//! auto-inferred collection schema as YAML; with `write = true` it also
+//! merges the inferred collection into the persisted schema file.
 
 use rmcp::ErrorData;
 use serde::Serialize;
@@ -19,17 +20,16 @@ pub struct SchemaShowOutput {
     pub schema: VaultSchema,
 }
 
-const SCHEMA_FILENAME: &str = "vaultdb-schema.yaml";
-
 pub fn schema_show(vault: &Vault, params: SchemaShowParams) -> Result<SchemaShowOutput, ErrorData> {
-    let path = vault.root.join(SCHEMA_FILENAME);
+    let path = schema::schema_path(&vault.root);
     let mut full = schema::load_schema(&path).map_err(|e| {
         ErrorData::invalid_params(format!("loading {}: {}", path.display(), e), None)
     })?;
 
     if let Some(folder) = params.folder {
+        let prefix = format!("{}/", folder);
         full.collections
-            .retain(|_, c| c.folder == folder || c.folder.starts_with(&format!("{}/", folder)));
+            .retain(|_, c| c.folder == folder || c.folder.starts_with(&prefix));
     }
 
     Ok(SchemaShowOutput {
@@ -39,12 +39,15 @@ pub fn schema_show(vault: &Vault, params: SchemaShowParams) -> Result<SchemaShow
 }
 
 /// Output of `schema_infer`: both the structured schema and a
-/// rendered YAML form (so the agent can hand it to the user verbatim).
+/// rendered YAML form. When `write = true`, also reports the path the
+/// schema was saved to.
 #[derive(Debug, Serialize)]
 pub struct SchemaInferOutput {
     pub folder: String,
     pub schema: CollectionSchema,
     pub yaml: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_to: Option<String>,
 }
 
 pub fn schema_infer(
@@ -59,46 +62,45 @@ pub fn schema_infer(
         .map_err(|e| ErrorData::invalid_params(format!("load_records: {}", e), None))?;
     let collection = schema::infer_schema(&params.folder, &load.records);
 
-    // Render a single-collection VaultSchema for the YAML output.
-    let mut single = VaultSchema {
-        collections: std::collections::BTreeMap::new(),
+    // Render either the single inferred collection (preview) or the
+    // merged full schema (when writing). The preview YAML is what an
+    // agent shows the user before opting into `write`.
+    let written_to = if params.write {
+        let schema_path = schema::schema_path(&vault.root);
+        let mut full = if schema_path.exists() {
+            schema::load_schema(&schema_path).map_err(|e| {
+                ErrorData::invalid_params(format!("loading existing schema: {}", e), None)
+            })?
+        } else {
+            VaultSchema {
+                collections: std::collections::BTreeMap::new(),
+            }
+        };
+        full.collections
+            .insert(params.folder.clone(), collection.clone());
+        let merged_yaml = schema::schema_to_yaml(&full)
+            .map_err(|e| ErrorData::invalid_params(format!("schema_to_yaml: {}", e), None))?;
+        std::fs::write(&schema_path, &merged_yaml).map_err(|e| {
+            ErrorData::invalid_params(format!("writing {}: {}", schema_path.display(), e), None)
+        })?;
+        Some(schema_path.display().to_string())
+    } else {
+        None
     };
-    single
-        .collections
-        .insert(params.folder.clone(), clone_collection(&collection));
-    let yaml = schema::schema_to_yaml(&single)
+
+    let preview = VaultSchema {
+        collections: std::collections::BTreeMap::from([(
+            params.folder.clone(),
+            collection.clone(),
+        )]),
+    };
+    let yaml = schema::schema_to_yaml(&preview)
         .map_err(|e| ErrorData::invalid_params(format!("schema_to_yaml: {}", e), None))?;
 
     Ok(SchemaInferOutput {
         folder: params.folder,
         schema: collection,
         yaml,
+        written_to,
     })
-}
-
-/// `CollectionSchema` doesn't derive `Clone` so we hand-clone for the
-/// "render one and return one" pattern. Cheap given the size.
-fn clone_collection(c: &CollectionSchema) -> CollectionSchema {
-    CollectionSchema {
-        description: c.description.clone(),
-        folder: c.folder.clone(),
-        filter: c.filter.clone(),
-        required: c.required.clone(),
-        fields: c
-            .fields
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    schema::FieldSchema {
-                        field_type: v.field_type.clone(),
-                        enum_values: v.enum_values.clone(),
-                        min: v.min,
-                        max: v.max,
-                        required: v.required,
-                    },
-                )
-            })
-            .collect(),
-    }
 }

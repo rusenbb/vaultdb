@@ -196,8 +196,8 @@ fn run() -> Result<()> {
             cli::SchemaAction::Validate { folder } => {
                 commands::schema_cmd::run_validate(&vault, folder, cli.recursive, cli.verbose)
             }
-            cli::SchemaAction::Init { folder } => {
-                commands::schema_cmd::run_init(&vault, folder, cli.recursive, cli.verbose)
+            cli::SchemaAction::Init { folder, write } => {
+                commands::schema_cmd::run_init(&vault, folder, cli.recursive, cli.verbose, *write)
             }
         },
     }

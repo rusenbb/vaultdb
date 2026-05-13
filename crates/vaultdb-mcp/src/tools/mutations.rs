@@ -26,7 +26,7 @@ pub fn plan_update(vault: &Vault, params: PlanUpdateParams) -> Result<MutationRe
         let (field, value_str) = s.split_once('=').ok_or_else(|| {
             invalid_params(format!("--set requires FIELD=VALUE format, got: {}", s))
         })?;
-        builder = builder.set(field.trim(), parse_set_value(value_str.trim()));
+        builder = builder.set(field.trim(), Value::parse_scalar(value_str.trim()));
     }
     for field in params.unset {
         builder = builder.unset(field);
@@ -68,17 +68,6 @@ pub fn plan_rename(vault: &Vault, params: PlanRenameParams) -> Result<MutationRe
 
 fn parse_where(s: &str) -> Result<Expr, ErrorData> {
     Expr::parse(s).map_err(|e| invalid_params(format!("invalid where expression '{}': {}", s, e)))
-}
-
-/// Best-effort numeric-or-string coercion for plan_update's `field=value`.
-fn parse_set_value(s: &str) -> Value {
-    if let Ok(i) = s.parse::<i64>() {
-        return Value::Integer(i);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return Value::Float(f);
-    }
-    Value::String(s.to_string())
 }
 
 fn invalid_params(message: String) -> ErrorData {

@@ -24,8 +24,8 @@ vaultdb-core = { path = "../../crates/vaultdb-core", version = "1.0.0" }
 # at link time — required for wheels distributed via PyPI.
 # `abi3-py39` builds a stable-ABI wheel that works on CPython 3.9+.
 pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 
 [package.metadata.maturin]
 # `python-source` is unset because everything Python-callable is

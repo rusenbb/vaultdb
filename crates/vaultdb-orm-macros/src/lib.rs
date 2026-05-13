@@ -4,10 +4,11 @@
 //! emits:
 //!
 //! - An `impl vaultdb_orm::Note` block (folder + optional discriminator).
-//! - One `pub fn <field>()` accessor per struct field, each returning a
-//!   `FieldRef` bound to the underlying frontmatter key. The key honours
-//!   `#[serde(rename = "...")]` so model authors can map onto virtual
-//!   fields like `_name` without writing it twice.
+//! - One `pub fn <field>()` accessor per struct field, returning either
+//!   a `FieldRef` (for plain frontmatter fields) or a `RelationRef`
+//!   (for fields marked with `#[note(wikilink)]` / `#[note(backlink)]`).
+//!   Plain fields honour `#[serde(rename = "...")]` so model authors
+//!   can map onto virtual fields like `_name` without writing it twice.
 //!
 //! Supported struct-level keys:
 //!
@@ -16,10 +17,14 @@
 //! - `#[note(filter = "...")]` (optional) — a where-DSL filter parsed
 //!   at runtime and applied as the discriminator.
 //!
-//! Field-level `#[note(...)]` attributes are reserved for later phases
-//! (e.g. `#[note(wikilink)]` in Phase 5) — for now, the presence of any
-//! `#[note(...)]` attribute on a field suppresses the accessor so the
-//! syntax stays free for future use.
+//! Supported field-level keys:
+//!
+//! - `#[note(wikilink)]` — outgoing relation accessor, emits a
+//!   `RelationRef` for filtering via `Expr::LinksTo`.
+//! - `#[note(backlink)]` — incoming relation accessor (`Expr::LinkedFrom`).
+//!
+//! Unknown field-level `#[note(...)]` keys are a compile error so typos
+//! like `#[note(wikilik)]` surface immediately.
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -108,13 +113,13 @@ fn field_accessors(data: &Data) -> syn::Result<proc_macro2::TokenStream> {
         },
         Data::Enum(e) => {
             return Err(syn::Error::new_spanned(
-                &e.enum_token,
+                e.enum_token,
                 "derive(Note) cannot be applied to an enum",
             ));
         }
         Data::Union(u) => {
             return Err(syn::Error::new_spanned(
-                &u.union_token,
+                u.union_token,
                 "derive(Note) cannot be applied to a union",
             ));
         }

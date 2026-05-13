@@ -5,12 +5,10 @@ use vaultdb_core::Expr;
 use vaultdb_core::schema::{self, VaultSchema};
 use vaultdb_core::vault::Vault;
 
-const SCHEMA_FILENAME: &str = "vaultdb-schema.yaml";
-
 /// Run `schema show` — display schema for a folder.
 pub fn run_show(vault: &Vault, folder: &str) -> Result<()> {
     let schema = load_vault_schema(vault)?;
-    let matching = find_collections_for_folder(&schema, folder);
+    let matching = schema.collections_for_folder(folder);
 
     if matching.is_empty() {
         println!("No schema defined for folder '{}'", folder);
@@ -67,7 +65,7 @@ pub fn run_show(vault: &Vault, folder: &str) -> Result<()> {
 /// Run `schema validate` — check records against their schema.
 pub fn run_validate(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> Result<()> {
     let schema = load_vault_schema(vault)?;
-    let matching = find_collections_for_folder(&schema, folder);
+    let matching = schema.collections_for_folder(folder);
 
     if matching.is_empty() {
         println!("No schema defined for folder '{}'", folder);
@@ -142,7 +140,18 @@ pub fn run_validate(vault: &Vault, folder: &str, recursive: bool, verbose: bool)
 }
 
 /// Run `schema init` — infer schema from existing data.
-pub fn run_init(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> Result<()> {
+///
+/// With `write = false` (the historical behaviour), the inferred YAML is
+/// printed to stdout for review. With `write = true`, the YAML is merged
+/// into `<vault>/vaultdb-schema.yaml` (existing collections at the same
+/// folder are replaced; other collections are preserved).
+pub fn run_init(
+    vault: &Vault,
+    folder: &str,
+    recursive: bool,
+    verbose: bool,
+    write: bool,
+) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
     let records = vault
         .load_records(&folder_path, recursive, verbose)?
@@ -153,35 +162,51 @@ pub fn run_init(vault: &Vault, folder: &str, recursive: bool, verbose: bool) -> 
         return Ok(());
     }
 
-    let collection = schema::infer_schema(folder, &records);
-    let schema = VaultSchema {
-        collections: std::collections::BTreeMap::from([(folder.to_string(), collection)]),
-    };
+    let inferred = schema::infer_schema(folder, &records);
+    let schema_path = schema::schema_path(&vault.root);
 
-    let yaml = schema::schema_to_yaml(&schema)?;
-    println!("{}", yaml);
+    if write {
+        // Merge into the existing schema file if one exists, otherwise
+        // start fresh. Replacing an existing collection at the same key
+        // is the obvious behaviour for `schema init` — the alternative
+        // (refuse to overwrite) makes the command useless on second run.
+        let mut full = if schema_path.exists() {
+            schema::load_schema(&schema_path)
+                .context(format!("loading existing {}", schema_path.display()))?
+        } else {
+            VaultSchema {
+                collections: std::collections::BTreeMap::new(),
+            }
+        };
+        full.collections.insert(folder.to_string(), inferred);
 
-    let schema_path = vault.root.join(SCHEMA_FILENAME);
-    println!(
-        "{}",
-        format!("To save, write this to: {}", schema_path.display()).dimmed()
-    );
+        let yaml = schema::schema_to_yaml(&full)?;
+        std::fs::write(&schema_path, &yaml)
+            .context(format!("writing {}", schema_path.display()))?;
+        println!(
+            "{}",
+            format!("wrote schema for '{}' to {}", folder, schema_path.display()).green()
+        );
+    } else {
+        let preview = VaultSchema {
+            collections: std::collections::BTreeMap::from([(folder.to_string(), inferred)]),
+        };
+        let yaml = schema::schema_to_yaml(&preview)?;
+        println!("{}", yaml);
+        println!(
+            "{}",
+            format!(
+                "Preview only. Re-run with --write to save to {}",
+                schema_path.display()
+            )
+            .dimmed()
+        );
+    }
 
     Ok(())
 }
 
 fn load_vault_schema(vault: &Vault) -> Result<VaultSchema> {
-    let schema_path = vault.root.join(SCHEMA_FILENAME);
+    let schema_path = schema::schema_path(&vault.root);
     schema::load_schema(&schema_path).context(format!("loading {}", schema_path.display()))
-}
-
-fn find_collections_for_folder<'a>(
-    schema: &'a VaultSchema,
-    folder: &str,
-) -> Vec<(&'a String, &'a schema::CollectionSchema)> {
-    schema
-        .collections
-        .iter()
-        .filter(|(_, c)| c.folder == folder || c.folder.starts_with(&format!("{}/", folder)))
-        .collect()
 }

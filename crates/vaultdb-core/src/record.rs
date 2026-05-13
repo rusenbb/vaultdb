@@ -367,6 +367,21 @@ impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
+
+    /// Best-effort parse of a CLI-style `FIELD=VALUE` scalar string into a
+    /// typed `Value`. Tries integer, then float, then falls back to a
+    /// string. Shared by every frontend that accepts loosely-typed user
+    /// input — CLI `--set`, MCP `plan_update`, the upcoming
+    /// `CreateBuilder` set-field path.
+    pub fn parse_scalar(s: &str) -> Self {
+        if let Ok(i) = s.parse::<i64>() {
+            return Value::Integer(i);
+        }
+        if let Ok(f) = s.parse::<f64>() {
+            return Value::Float(f);
+        }
+        Value::String(s.to_string())
+    }
 }
 
 impl std::fmt::Display for Value {

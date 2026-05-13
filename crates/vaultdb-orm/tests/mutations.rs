@@ -92,7 +92,11 @@ fn execute_writes_and_skips_records_outside_filter() {
         .first()
         .unwrap()
         .unwrap();
-    assert_eq!(beta.rating.as_deref(), Some("read"), "Beta must be untouched");
+    assert_eq!(
+        beta.rating.as_deref(),
+        Some("read"),
+        "Beta must be untouched"
+    );
 }
 
 #[test]

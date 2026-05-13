@@ -12,8 +12,8 @@ categories = ["database", "text-processing"]
 [dependencies]
 vaultdb-core = { path = "../vaultdb-core", version = "1.0.0" }
 rusqlite = { version = "0.32", features = ["bundled", "modern_sqlite"] }
-thiserror = "2"
-tracing = "0.1"
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

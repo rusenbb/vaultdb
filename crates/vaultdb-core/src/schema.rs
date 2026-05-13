@@ -3,21 +3,48 @@
 //! schema; `schema_to_yaml` renders a schema to YAML for persistence.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VaultdbError};
 use crate::record::Value;
 
+/// Canonical filename for the persisted schema, relative to the vault root.
+/// CLI and MCP both load `<vault>/vaultdb-schema.yaml` via this constant.
+pub const SCHEMA_FILENAME: &str = "vaultdb-schema.yaml";
+
+/// Resolve the schema file path for a vault root.
+pub fn schema_path(vault_root: &Path) -> PathBuf {
+    vault_root.join(SCHEMA_FILENAME)
+}
+
 /// Top-level schema file structure.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultSchema {
     pub collections: BTreeMap<String, CollectionSchema>,
 }
 
+impl VaultSchema {
+    /// Collections whose `folder` matches `folder` exactly, or is a path
+    /// under it (e.g. when `folder = "Notes"`, also matches collections
+    /// declared with `folder: Notes/movie`). Used by `schema show` /
+    /// `schema validate` to scope queries to a folder, and by the MCP
+    /// `schema_show` tool's optional folder filter.
+    pub fn collections_for_folder<'a>(
+        &'a self,
+        folder: &str,
+    ) -> Vec<(&'a String, &'a CollectionSchema)> {
+        let prefix = format!("{}/", folder);
+        self.collections
+            .iter()
+            .filter(|(_, c)| c.folder == folder || c.folder.starts_with(&prefix))
+            .collect()
+    }
+}
+
 /// Schema for a single collection (a folder + optional filter).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionSchema {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -31,7 +58,7 @@ pub struct CollectionSchema {
 }
 
 /// Schema for a single field.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldSchema {
     #[serde(rename = "type")]
     pub field_type: String,
@@ -42,8 +69,6 @@ pub struct FieldSchema {
     pub min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub required: Option<bool>,
 }
 
 /// Load schema from a file.
@@ -277,9 +302,10 @@ pub fn infer_schema(folder_name: &str, records: &[crate::record::Record]) -> Col
                 enum_values,
                 min: None,
                 max: None,
-                required: None,
             },
         );
+        // `required` is tracked at the collection level (above); kept out
+        // of `FieldSchema` deliberately so there's a single source of truth.
     }
 
     CollectionSchema {
@@ -335,7 +361,6 @@ mod tests {
                 enum_values: vec![],
                 min: None,
                 max: None,
-                required: None,
             },
         );
 
@@ -366,7 +391,6 @@ mod tests {
                 ],
                 min: None,
                 max: None,
-                required: None,
             },
         );
 
@@ -394,7 +418,6 @@ mod tests {
                 enum_values: vec![],
                 min: Some(1.0),
                 max: Some(10.0),
-                required: None,
             },
         );
 
@@ -422,7 +445,6 @@ mod tests {
                 enum_values: vec![Value::String("to-watch".into())],
                 min: None,
                 max: None,
-                required: None,
             },
         );
 
