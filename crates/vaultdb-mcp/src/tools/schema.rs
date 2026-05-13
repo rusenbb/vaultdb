@@ -96,6 +96,8 @@ fn clone_collection(c: &CollectionSchema) -> CollectionSchema {
                         min: v.min,
                         max: v.max,
                         required: v.required,
+                        default: v.default.clone(),
+                        default_expr: v.default_expr.clone(),
                     },
                 )
             })

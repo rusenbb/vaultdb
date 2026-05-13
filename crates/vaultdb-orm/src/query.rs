@@ -127,7 +127,9 @@ impl<'v, T: Note> Query<'v, T> {
                     .into(),
             ));
         }
-        let filter = self.filter.expect("filter set when has_user_filter is true");
+        let filter = self
+            .filter
+            .expect("filter set when has_user_filter is true");
         Ok(Update::new(self.vault, filter))
     }
 }

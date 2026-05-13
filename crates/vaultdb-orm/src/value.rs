@@ -82,7 +82,7 @@ mod tests {
             Value::Null,
             Value::String("hi".into()),
             Value::Integer(42),
-            Value::Float(3.14),
+            Value::Float(std::f64::consts::PI),
             Value::Bool(true),
         ];
         for v in cases {

@@ -108,13 +108,13 @@ fn field_accessors(data: &Data) -> syn::Result<proc_macro2::TokenStream> {
         },
         Data::Enum(e) => {
             return Err(syn::Error::new_spanned(
-                &e.enum_token,
+                e.enum_token,
                 "derive(Note) cannot be applied to an enum",
             ));
         }
         Data::Union(u) => {
             return Err(syn::Error::new_spanned(
-                &u.union_token,
+                u.union_token,
                 "derive(Note) cannot be applied to a union",
             ));
         }

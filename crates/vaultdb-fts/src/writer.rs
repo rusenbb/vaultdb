@@ -33,7 +33,12 @@ pub fn upsert(conn: &Connection, doc: &Document) -> Result<(), FtsError> {
         conn.execute(
             "INSERT OR REPLACE INTO entities (file_id, name, path, mtime_ns) \
              VALUES (?1, ?2, ?3, ?4)",
-            params![doc.file_id, doc.name, doc.path.to_string_lossy().as_ref(), doc.mtime_ns],
+            params![
+                doc.file_id,
+                doc.name,
+                doc.path.to_string_lossy().as_ref(),
+                doc.mtime_ns
+            ],
         )?;
         let rowid: i64 = conn.query_row(
             "SELECT rowid FROM entities WHERE file_id = ?1",

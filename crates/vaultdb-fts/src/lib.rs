@@ -41,9 +41,7 @@ mod reconcile;
 mod schema;
 mod writer;
 
-pub use parse_errors::{
-    ParseErrorRow, clear_parse_error, list_parse_errors, record_parse_error,
-};
+pub use parse_errors::{ParseErrorRow, clear_parse_error, list_parse_errors, record_parse_error};
 pub use reader::{SearchHit, search};
 pub use reconcile::{OwnedDocument, ReconcileSummary, reconcile};
 pub use schema::{FTS_SCHEMA_VERSION, InitOutcome, init_schema};

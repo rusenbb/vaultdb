@@ -44,6 +44,10 @@ pub struct FieldSchema {
     pub max: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_expr: Option<String>,
 }
 
 /// Load schema from a file.
@@ -56,8 +60,10 @@ pub fn load_schema(path: &Path) -> Result<VaultSchema> {
     let content = std::fs::read_to_string(path).map_err(|_| {
         VaultdbError::SchemaError(format!("cannot read schema file: {}", path.display()))
     })?;
-    serde_yaml::from_str(&content)
-        .map_err(|e| VaultdbError::SchemaError(format!("parsing {}: {}", path.display(), e)))
+    let schema: VaultSchema = serde_yaml::from_str(&content)
+        .map_err(|e| VaultdbError::SchemaError(format!("parsing {}: {}", path.display(), e)))?;
+    validate_defaults(&schema, path)?;
+    Ok(schema)
 }
 
 /// Serialize a schema to YAML string.
@@ -121,30 +127,20 @@ pub fn validate_record(
         }
 
         // Enum check
-        if !field_schema.enum_values.is_empty() {
-            let display = value.display_value();
-            let matches_enum = field_schema.enum_values.iter().any(|e| match e {
-                Value::String(s) => s == &display,
-                Value::Integer(i) => i.to_string() == display,
-                Value::Float(f) => f.to_string() == display,
-                Value::Bool(b) => b.to_string() == display,
-                _ => false,
+        if !field_schema.enum_values.is_empty() && !matches_enum(value, &field_schema.enum_values) {
+            violations.push(Violation {
+                file: filename.to_string(),
+                field: field_name.clone(),
+                message: format!(
+                    "value '{}' not in allowed values: {:?}",
+                    value.display_value(),
+                    field_schema
+                        .enum_values
+                        .iter()
+                        .map(value_display)
+                        .collect::<Vec<_>>()
+                ),
             });
-            if !matches_enum {
-                violations.push(Violation {
-                    file: filename.to_string(),
-                    field: field_name.clone(),
-                    message: format!(
-                        "value '{}' not in allowed values: {:?}",
-                        display,
-                        field_schema
-                            .enum_values
-                            .iter()
-                            .map(value_display)
-                            .collect::<Vec<_>>()
-                    ),
-                });
-            }
         }
 
         // Min/max check for numeric fields
@@ -184,6 +180,17 @@ fn value_display(v: &Value) -> String {
     }
 }
 
+fn matches_enum(value: &Value, enum_values: &[Value]) -> bool {
+    let display = value.display_value();
+    enum_values.iter().any(|e| match e {
+        Value::String(s) => s == &display,
+        Value::Integer(i) => i.to_string() == display,
+        Value::Float(f) => f.to_string() == display,
+        Value::Bool(b) => b.to_string() == display,
+        _ => false,
+    })
+}
+
 fn type_matches(actual: &str, expected: &str) -> bool {
     match expected {
         "string" => actual == "string",
@@ -195,6 +202,69 @@ fn type_matches(actual: &str, expected: &str) -> bool {
         "map" => actual == "map",
         _ => true, // unknown type — don't enforce
     }
+}
+
+fn validate_defaults(schema: &VaultSchema, schema_path: &Path) -> Result<()> {
+    for (collection_name, collection) in &schema.collections {
+        for (field_name, field_schema) in &collection.fields {
+            if field_schema.default.is_some() && field_schema.default_expr.is_some() {
+                return Err(VaultdbError::SchemaError(format!(
+                    "invalid {}: collections.{}.fields.{} cannot set both default and default_expr",
+                    schema_path.display(),
+                    collection_name,
+                    field_name
+                )));
+            }
+
+            if let Some(expr) = field_schema.default_expr.as_deref() {
+                match expr {
+                    "today" | "now" | "epoch" => {}
+                    other => {
+                        return Err(VaultdbError::SchemaError(format!(
+                            "invalid {}: collections.{}.fields.{}.default_expr unknown value '{}'; expected one of: today, now, epoch",
+                            schema_path.display(),
+                            collection_name,
+                            field_name,
+                            other
+                        )));
+                    }
+                }
+            }
+
+            if let Some(default) = &field_schema.default {
+                let actual_type = default.type_name();
+                let expected_type = &field_schema.field_type;
+                if !type_matches(actual_type, expected_type) {
+                    return Err(VaultdbError::SchemaError(format!(
+                        "invalid {}: collections.{}.fields.{}.default expected type '{}', got '{}'",
+                        schema_path.display(),
+                        collection_name,
+                        field_name,
+                        expected_type,
+                        actual_type
+                    )));
+                }
+
+                if !field_schema.enum_values.is_empty()
+                    && !matches_enum(default, &field_schema.enum_values)
+                {
+                    return Err(VaultdbError::SchemaError(format!(
+                        "invalid {}: collections.{}.fields.{}.default value '{}' not in allowed values: {:?}",
+                        schema_path.display(),
+                        collection_name,
+                        field_name,
+                        default.display_value(),
+                        field_schema
+                            .enum_values
+                            .iter()
+                            .map(value_display)
+                            .collect::<Vec<_>>()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Infer a schema from a set of records.
@@ -278,6 +348,8 @@ pub fn infer_schema(folder_name: &str, records: &[crate::record::Record]) -> Col
                 min: None,
                 max: None,
                 required: None,
+                default: None,
+                default_expr: None,
             },
         );
     }
@@ -336,6 +408,8 @@ mod tests {
                 min: None,
                 max: None,
                 required: None,
+                default: None,
+                default_expr: None,
             },
         );
 
@@ -367,6 +441,8 @@ mod tests {
                 min: None,
                 max: None,
                 required: None,
+                default: None,
+                default_expr: None,
             },
         );
 
@@ -395,6 +471,8 @@ mod tests {
                 min: Some(1.0),
                 max: Some(10.0),
                 required: None,
+                default: None,
+                default_expr: None,
             },
         );
 
@@ -423,6 +501,8 @@ mod tests {
                 min: None,
                 max: None,
                 required: None,
+                default: None,
+                default_expr: None,
             },
         );
 
@@ -457,5 +537,86 @@ mod tests {
         assert_eq!(schema.fields.get("year").unwrap().field_type, "integer");
         assert!(schema.required.contains(&"status".to_string()));
         assert!(schema.required.contains(&"year".to_string()));
+    }
+
+    #[test]
+    fn load_schema_rejects_unknown_default_expr() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vaultdb-schema.yaml");
+        std::fs::write(
+            &path,
+            r#"
+collections:
+  flashcard:
+    folder: Notes/flashcard
+    fields:
+      due: { type: string, default_expr: tomorrow }
+"#,
+        )
+        .unwrap();
+
+        let err = load_schema(&path).unwrap_err().to_string();
+        assert!(err.contains("default_expr"));
+        assert!(err.contains("today"));
+    }
+
+    #[test]
+    fn load_schema_validates_literal_default_type_and_enum() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vaultdb-schema.yaml");
+        std::fs::write(
+            &path,
+            r#"
+collections:
+  flashcard:
+    folder: Notes/flashcard
+    fields:
+      reps: { type: integer, default: hello }
+"#,
+        )
+        .unwrap();
+
+        let err = load_schema(&path).unwrap_err().to_string();
+        assert!(err.contains("default expected type"));
+
+        std::fs::write(
+            &path,
+            r#"
+collections:
+  flashcard:
+    folder: Notes/flashcard
+    fields:
+      state: { type: string, enum: [new, review], default: learning }
+"#,
+        )
+        .unwrap();
+
+        let err = load_schema(&path).unwrap_err().to_string();
+        assert!(err.contains("not in allowed values"));
+    }
+
+    #[test]
+    fn load_schema_accepts_known_default_expr_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vaultdb-schema.yaml");
+        std::fs::write(
+            &path,
+            r#"
+collections:
+  flashcard:
+    folder: Notes/flashcard
+    fields:
+      due: { type: string, default_expr: today }
+      created_at: { type: integer, default_expr: epoch }
+      updated_at: { type: string, default_expr: now }
+"#,
+        )
+        .unwrap();
+
+        let schema = load_schema(&path).unwrap();
+        let fields = &schema.collections["flashcard"].fields;
+        assert_eq!(fields["due"].default_expr.as_deref(), Some("today"));
+        assert_eq!(fields["created_at"].default_expr.as_deref(), Some("epoch"));
+        assert_eq!(fields["updated_at"].default_expr.as_deref(), Some("now"));
     }
 }

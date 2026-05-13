@@ -27,11 +27,13 @@ struct Paper {
 
     /// Outgoing wiki-links. Not populated automatically in v1 —
     /// the field is here as a marker for the relation accessor.
+    #[allow(dead_code)]
     #[serde(default, skip)]
     #[note(wikilink)]
     cites: Vec<String>,
 
     /// Notes that wiki-link to this paper.
+    #[allow(dead_code)]
     #[serde(default, skip)]
     #[note(backlink)]
     cited_by: Vec<String>,
@@ -68,7 +70,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n--- papers from 2024 that cite a paper tagged topic/attention ---");
     let combined: Vec<Paper> = Query::<Paper>::new(&vault)
-        .filter(Paper::year().eq(2024) & Paper::cites().any(Paper::tags().contains("topic/attention")))
+        .filter(
+            Paper::year().eq(2024) & Paper::cites().any(Paper::tags().contains("topic/attention")),
+        )
         .fetch()?;
     for p in &combined {
         println!("  {} ({})", p.title, p.year);
