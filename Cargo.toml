@@ -30,6 +30,10 @@ thiserror = "2"
 tempfile = "3"
 tracing = "0.1"
 clap = { version = "4", features = ["derive"] }
+# Used by vaultdb-core to validate `type: url` schema fields. Eduport
+# also pulls this in independently; centralising the version keeps the
+# two consumers locked together.
+url = "2"
 
 [profile.release]
 lto = true

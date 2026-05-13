@@ -21,6 +21,9 @@ tempfile.workspace = true
 tracing.workspace = true
 pest = "2"
 pest_derive = "2"
+# URL validation for `type: url` schema fields. Only `schema::validate_url`
+# imports this; no other code path uses it.
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

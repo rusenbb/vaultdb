@@ -193,6 +193,49 @@ pub fn validate_record(
                 message: format!("value {} exceeds maximum {}", num, max),
             });
         }
+
+        // Format checks for the "string-shaped but constrained" types.
+        // These don't introduce new Value variants — on disk they're
+        // still YAML strings — but validate_record refuses values that
+        // don't match the expected format.
+        if let Value::String(s) = value {
+            match expected_type.as_str() {
+                "wikilink" => {
+                    if !is_valid_wikilink(s) {
+                        violations.push(Violation {
+                            file: filename.to_string(),
+                            field: field_name.clone(),
+                            message: format!(
+                                "value '{}' is not a valid wikilink; expected [[name]], [[name|alias]], [[name#section]], or [[name#section|alias]]",
+                                s
+                            ),
+                        });
+                    }
+                }
+                "date" => {
+                    if !is_valid_date(s) {
+                        violations.push(Violation {
+                            file: filename.to_string(),
+                            field: field_name.clone(),
+                            message: format!(
+                                "value '{}' is not a valid date; expected YYYY-MM-DD",
+                                s
+                            ),
+                        });
+                    }
+                }
+                "url" => {
+                    if !is_valid_url(s) {
+                        violations.push(Violation {
+                            file: filename.to_string(),
+                            field: field_name.clone(),
+                            message: format!("value '{}' is not a valid URL", s),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     violations
@@ -218,8 +261,60 @@ fn type_matches(actual: &str, expected: &str) -> bool {
         "bool" => actual == "bool",
         "list" => actual == "list",
         "map" => actual == "map",
+        // Constrained string types: stored as YAML strings on disk,
+        // distinguished from plain string by a format check applied
+        // after the type check in `validate_record`.
+        "wikilink" | "date" | "url" => actual == "string",
         _ => true, // unknown type — don't enforce
     }
+}
+
+/// True if `s` is a syntactically valid wikilink: `[[target]]`, with
+/// optional `|alias` and/or `#section`. Target must be non-empty and
+/// must not contain `]]`. Does NOT verify the target exists in the
+/// vault — that requires a `LinkGraph` and is out of scope for v1.
+pub fn is_valid_wikilink(s: &str) -> bool {
+    let inner = match s.strip_prefix("[[").and_then(|x| x.strip_suffix("]]")) {
+        Some(i) => i,
+        None => return false,
+    };
+    // Brackets are the outer delimiters only — anything inside that
+    // contains `[` or `]` is malformed (e.g. `[[a][b]]`).
+    if inner.is_empty() || inner.contains('[') || inner.contains(']') {
+        return false;
+    }
+    // Target is everything up to the first `|` or `#`.
+    let target_end = inner.find(['|', '#']).unwrap_or(inner.len());
+    !inner[..target_end].trim().is_empty()
+}
+
+/// True if `s` parses as a calendar date in `YYYY-MM-DD` form, with the
+/// month and day in valid ranges. Does NOT do leap-year validation —
+/// `2024-02-30` passes today; a stricter check can come in Phase 8 if
+/// the false-negative cost ever materialises.
+pub fn is_valid_date(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    if parts[0].len() != 4 || parts[1].len() != 2 || parts[2].len() != 2 {
+        return false;
+    }
+    let year = parts[0].parse::<u32>();
+    let month = parts[1].parse::<u32>();
+    let day = parts[2].parse::<u32>();
+    match (year, month, day) {
+        (Ok(_), Ok(m), Ok(d)) => (1..=12).contains(&m) && (1..=31).contains(&d),
+        _ => false,
+    }
+}
+
+/// True if `s` parses as an absolute URL (i.e. has a scheme like
+/// `https`, `http`, `mailto`, `file`, …). Relative URLs are rejected
+/// on purpose — a vault field declared `type: url` should be navigable
+/// on its own.
+pub fn is_valid_url(s: &str) -> bool {
+    url::Url::parse(s).is_ok()
 }
 
 /// Infer a schema from a set of records.
@@ -479,5 +574,149 @@ mod tests {
         assert_eq!(schema.fields.get("year").unwrap().field_type, "integer");
         assert!(schema.required.contains(&"status".to_string()));
         assert!(schema.required.contains(&"year".to_string()));
+    }
+
+    // ── Phase 1: wikilink / date / url type validation ────────────────
+
+    fn schema_with_field(name: &str, field_type: &str) -> CollectionSchema {
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            name.into(),
+            FieldSchema {
+                field_type: field_type.into(),
+                enum_values: vec![],
+                min: None,
+                max: None,
+            },
+        );
+        CollectionSchema {
+            description: None,
+            folder: "notes".into(),
+            filter: vec![],
+            required: vec![],
+            fields,
+        }
+    }
+
+    #[test]
+    fn wikilink_accepts_plain() {
+        assert!(is_valid_wikilink("[[name]]"));
+        assert!(is_valid_wikilink("[[kyoto-university-kyoto-yoshida-KG9l]]"));
+    }
+
+    #[test]
+    fn wikilink_accepts_alias_and_section() {
+        assert!(is_valid_wikilink("[[name|alias]]"));
+        assert!(is_valid_wikilink("[[name#section]]"));
+        assert!(is_valid_wikilink("[[name#section|alias]]"));
+    }
+
+    #[test]
+    fn wikilink_rejects_malformed() {
+        assert!(!is_valid_wikilink("name"));
+        assert!(!is_valid_wikilink("[name]"));
+        assert!(!is_valid_wikilink("[[]]"));
+        assert!(!is_valid_wikilink("[[  ]]"));
+        assert!(!is_valid_wikilink("[[a][b]]"));
+    }
+
+    #[test]
+    fn validate_wikilink_field_catches_bad_value() {
+        let schema = schema_with_field("university", "wikilink");
+        let record = make_record(vec![("university", Value::String("kyoto".into()))]);
+        let violations = validate_record("p.md", &record.fields, &schema);
+        assert_eq!(violations.len(), 1, "{:?}", violations);
+        assert!(violations[0].message.contains("wikilink"));
+    }
+
+    #[test]
+    fn validate_wikilink_field_passes_good_value() {
+        let schema = schema_with_field("university", "wikilink");
+        let record = make_record(vec![(
+            "university",
+            Value::String("[[kyoto-university-KG9l]]".into()),
+        )]);
+        let violations = validate_record("p.md", &record.fields, &schema);
+        assert!(violations.is_empty(), "{:?}", violations);
+    }
+
+    #[test]
+    fn date_accepts_iso_calendar() {
+        assert!(is_valid_date("2024-05-13"));
+        assert!(is_valid_date("1999-01-01"));
+        assert!(is_valid_date("2030-12-31"));
+    }
+
+    #[test]
+    fn date_rejects_garbage_and_wrong_components() {
+        assert!(!is_valid_date("not-a-date"));
+        assert!(!is_valid_date("2024/05/13"));
+        assert!(!is_valid_date("2024-13-01")); // bad month
+        assert!(!is_valid_date("2024-00-15")); // bad month
+        assert!(!is_valid_date("2024-05-32")); // bad day
+        assert!(!is_valid_date("24-05-13")); // 2-digit year
+        assert!(!is_valid_date("2024-5-13")); // 1-digit month
+    }
+
+    #[test]
+    fn validate_date_field_catches_bad_value() {
+        let schema = schema_with_field("due", "date");
+        let record = make_record(vec![("due", Value::String("not-a-date".into()))]);
+        let violations = validate_record("t.md", &record.fields, &schema);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("date"));
+    }
+
+    #[test]
+    fn validate_date_field_passes_good_value() {
+        let schema = schema_with_field("due", "date");
+        let record = make_record(vec![("due", Value::String("2024-05-13".into()))]);
+        let violations = validate_record("t.md", &record.fields, &schema);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn url_accepts_common_schemes() {
+        assert!(is_valid_url("https://example.com"));
+        assert!(is_valid_url("http://example.com/path?q=1"));
+        assert!(is_valid_url("mailto:a@b.com"));
+        assert!(is_valid_url("file:///tmp/x"));
+    }
+
+    #[test]
+    fn url_rejects_garbage_and_relative() {
+        assert!(!is_valid_url("not a url"));
+        assert!(!is_valid_url("/relative/path"));
+        assert!(!is_valid_url("example.com")); // no scheme
+    }
+
+    #[test]
+    fn validate_url_field_catches_bad_value() {
+        let schema = schema_with_field("homepage", "url");
+        let record = make_record(vec![("homepage", Value::String("example.com".into()))]);
+        let violations = validate_record("p.md", &record.fields, &schema);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("URL"));
+    }
+
+    #[test]
+    fn validate_url_field_passes_good_value() {
+        let schema = schema_with_field("homepage", "url");
+        let record = make_record(vec![(
+            "homepage",
+            Value::String("https://example.com".into()),
+        )]);
+        let violations = validate_record("p.md", &record.fields, &schema);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn constrained_type_still_requires_string_actual() {
+        // A wikilink-typed field receiving an integer should fail the
+        // type check, not just the wikilink-format check.
+        let schema = schema_with_field("university", "wikilink");
+        let record = make_record(vec![("university", Value::Integer(42))]);
+        let violations = validate_record("p.md", &record.fields, &schema);
+        assert!(violations.iter().any(|v| v.message.contains("type")));
     }
 }
