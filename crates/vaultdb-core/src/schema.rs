@@ -326,43 +326,27 @@ pub fn validate_record(
         // Format checks for the "string-shaped but constrained" types.
         // These don't introduce new Value variants — on disk they're
         // still YAML strings — but validate_record refuses values that
-        // don't match the expected format.
+        // don't match the expected format. Match arms with guards
+        // keep clippy's `collapsible_match` happy.
         if let Value::String(s) = value {
-            match expected_type.as_str() {
-                "wikilink" => {
-                    if !is_valid_wikilink(s) {
-                        violations.push(Violation {
-                            file: filename.to_string(),
-                            field: field_name.clone(),
-                            message: format!(
-                                "value '{}' is not a valid wikilink; expected [[name]], [[name|alias]], [[name#section]], or [[name#section|alias]]",
-                                s
-                            ),
-                        });
-                    }
-                }
-                "date" => {
-                    if !is_valid_date(s) {
-                        violations.push(Violation {
-                            file: filename.to_string(),
-                            field: field_name.clone(),
-                            message: format!(
-                                "value '{}' is not a valid date; expected YYYY-MM-DD",
-                                s
-                            ),
-                        });
-                    }
-                }
-                "url" => {
-                    if !is_valid_url(s) {
-                        violations.push(Violation {
-                            file: filename.to_string(),
-                            field: field_name.clone(),
-                            message: format!("value '{}' is not a valid URL", s),
-                        });
-                    }
-                }
-                _ => {}
+            let bad = match expected_type.as_str() {
+                "wikilink" if !is_valid_wikilink(s) => Some(format!(
+                    "value '{}' is not a valid wikilink; expected [[name]], [[name|alias]], [[name#section]], or [[name#section|alias]]",
+                    s
+                )),
+                "date" if !is_valid_date(s) => Some(format!(
+                    "value '{}' is not a valid date; expected YYYY-MM-DD",
+                    s
+                )),
+                "url" if !is_valid_url(s) => Some(format!("value '{}' is not a valid URL", s)),
+                _ => None,
+            };
+            if let Some(message) = bad {
+                violations.push(Violation {
+                    file: filename.to_string(),
+                    field: field_name.clone(),
+                    message,
+                });
             }
         }
     }

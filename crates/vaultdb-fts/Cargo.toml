@@ -10,7 +10,7 @@ keywords = ["vaultdb", "fts5", "search", "markdown", "sqlite"]
 categories = ["database", "text-processing"]
 
 [dependencies]
-vaultdb-core = { path = "../vaultdb-core", version = "1.0.0" }
+vaultdb-core = { path = "../vaultdb-core", version = "1.1.0" }
 rusqlite = { version = "0.32", features = ["bundled", "modern_sqlite"] }
 thiserror.workspace = true
 tracing.workspace = true

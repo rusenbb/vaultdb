@@ -16,7 +16,7 @@ categories = ["wasm", "api-bindings", "parser-implementations"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-vaultdb-core = { path = "../../crates/vaultdb-core", version = "1.0.0" }
+vaultdb-core = { path = "../../crates/vaultdb-core", version = "1.1.0" }
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
 serde.workspace = true
