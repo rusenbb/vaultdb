@@ -36,6 +36,10 @@
 //! - [`UpdateBuilder`], [`DeleteBuilder`], [`MoveBuilder`], [`RenameBuilder`]:
 //!   typed mutation API. Each has [`UpdateBuilder::plan`]-style preview and
 //!   `execute` commit methods.
+//! - [`render`]: serialize query results to CSV / JSON / YAML / XLSX and
+//!   write them to a vault-scoped path. The CLI's `--output` flag and the
+//!   MCP read tools' `export` parameter both use this. XLSX is behind
+//!   the `xlsx` Cargo feature.
 //! - [`LoadResult`], [`ParseError`]: parse-diagnostic surfacing for
 //!   [`Vault::load_records`].
 //! - [`VaultdbError`], [`Result`]: error types.
