@@ -41,6 +41,14 @@ impl VaultSchema {
             .filter(|(_, c)| c.folder == folder || c.folder.starts_with(&prefix))
             .collect()
     }
+
+    /// The single collection whose `folder` matches `folder` exactly.
+    /// Used by `CreateBuilder` to pick the unambiguous schema for a
+    /// `vaultdb create <folder>` invocation. Prefix matches don't apply
+    /// here — for a create, the user means a specific folder.
+    pub fn collection_for_folder<'a>(&'a self, folder: &str) -> Option<&'a CollectionSchema> {
+        self.collections.values().find(|c| c.folder == folder)
+    }
 }
 
 /// Schema for a single collection (a folder + optional filter).
@@ -83,9 +91,26 @@ pub struct FieldSchema {
 }
 
 /// Recognised values for `FieldSchema::default_expr`. Any other value is
-/// rejected at schema load time. Resolution happens elsewhere (in
-/// `CreateBuilder`, Phase 3) — this enum is just the contract.
+/// rejected at schema load time. Resolution to a concrete `Value`
+/// happens in `resolve_default_expr` below; `CreateBuilder` calls it
+/// at the moment a record is created.
 pub const DEFAULT_EXPRS: &[&str] = &["today", "now", "epoch"];
+
+/// Resolve a `default_expr` keyword to a concrete `Value` using
+/// wall-clock now. Returns `SchemaError` for unknown keywords
+/// (defence-in-depth — `load_schema` rejects these earlier, but the
+/// helper stays safe to call from any code path).
+pub fn resolve_default_expr(expr: &str) -> Result<Value> {
+    match expr {
+        "today" => Ok(Value::String(crate::record::today_string())),
+        "now" => Ok(Value::String(crate::record::now_string())),
+        "epoch" => Ok(Value::Integer(crate::record::epoch_seconds())),
+        other => Err(VaultdbError::SchemaError(format!(
+            "unknown default_expr '{}' (expected one of {:?})",
+            other, DEFAULT_EXPRS
+        ))),
+    }
+}
 
 /// Load schema from a file.
 ///

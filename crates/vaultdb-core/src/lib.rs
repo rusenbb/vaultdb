@@ -63,8 +63,8 @@ pub mod writer;
 pub use error::{ParseError, Result, VaultdbError};
 pub use links::{Direction, GraphScope, LinkGraph, UnresolvedLink};
 pub use mutation::{
-    DeleteBuilder, MoveBuilder, MutationError, MutationReport, PlannedChange, RenameBuilder,
-    UpdateBuilder,
+    CreateBuilder, DeleteBuilder, MoveBuilder, MutationError, MutationReport, PlannedChange,
+    RenameBuilder, UpdateBuilder,
 };
 pub use query::{CompareOp, Expr, LinkPredicate, Predicate, Query, SortKey};
 pub use record::{Record, Value};

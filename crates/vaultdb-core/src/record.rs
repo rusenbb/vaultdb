@@ -240,6 +240,36 @@ fn format_system_time(t: SystemTime) -> String {
     )
 }
 
+/// Today's calendar date in `YYYY-MM-DD` form. Used by
+/// `FieldSchema::default_expr = today` and by any consumer that needs
+/// a date matching the format vaultdb's virtual-field outputs use.
+pub fn today_string() -> String {
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86400;
+    let (y, m, d) = epoch_days_to_date(days);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// Wall-clock now in `YYYY-MM-DD HH:MM` form. Used by
+/// `FieldSchema::default_expr = now`. Format matches the existing
+/// `_modified` / `_created` virtual fields so values are sortable
+/// together.
+pub fn now_string() -> String {
+    format_system_time(SystemTime::now())
+}
+
+/// Seconds since the Unix epoch. Used by
+/// `FieldSchema::default_expr = epoch`.
+pub fn epoch_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
     // Algorithm from http://howardhinnant.github.io/date_algorithms.html
     let z = days + 719468;

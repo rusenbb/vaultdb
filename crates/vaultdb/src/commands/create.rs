@@ -1,11 +1,17 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 
-use vaultdb_core::frontmatter;
+use vaultdb_core::schema::{self, VaultSchema};
 use vaultdb_core::vault::Vault;
-use vaultdb_core::writer;
+use vaultdb_core::{CreateBuilder, Value};
 
-/// Run the `create` command — create a new note, optionally from a template.
+/// Run the `create` command — create a new note, optionally from a template
+/// and a schema collection.
+///
+/// When `<vault>/vaultdb-schema.yaml` exists and contains a collection whose
+/// `folder` matches `folder` exactly, that collection's `default:` /
+/// `default_expr:` fields auto-fill anything not supplied via `--set`, and
+/// `required:` is enforced before the file is written.
 pub fn run_create(
     vault: &Vault,
     folder: &str,
@@ -14,68 +20,72 @@ pub fn run_create(
     set_args: &[String],
     dry_run: bool,
 ) -> Result<()> {
-    let folder_path = vault.resolve_folder(folder)?;
-    let filename = format!("{}.md", name);
-    let dest = folder_path.join(&filename);
+    let mut builder = CreateBuilder::new(folder, name);
 
-    if dest.exists() {
-        anyhow::bail!("file already exists: {}", dest.display());
+    if let Some(t) = template {
+        builder = builder.template(t);
     }
 
-    // Start with template content or minimal frontmatter
-    let mut content = match template {
-        Some(tmpl_path) => {
-            let tmpl_file = vault.root.join(tmpl_path);
-            if !tmpl_file.exists() {
-                anyhow::bail!("template not found: {}", tmpl_file.display());
-            }
-            std::fs::read_to_string(&tmpl_file)
-                .context(format!("reading template: {}", tmpl_path))?
-        }
-        None => format!("---\n---\n\n# {}\n", name),
-    };
-
-    // Apply --set overrides
     for s in set_args {
         let (field, value) = s
             .split_once('=')
             .ok_or_else(|| anyhow::anyhow!("--set requires FIELD=VALUE format, got: {}", s))?;
-        let field = field.trim();
-        let value = value.trim();
+        builder = builder.set(field.trim(), Value::parse_scalar(value.trim()));
+    }
 
-        // Check if the file has frontmatter we can modify
-        if frontmatter::extract_frontmatter(&content).is_some() {
-            let (new_content, _) = writer::set_field(&content, field, value)
-                .context(format!("setting field '{}' on new note", field))?;
-            content = new_content;
-        } else {
-            // No frontmatter — wrap content with frontmatter
-            content = format!(
-                "---\n{}: {}\n---\n{}",
-                field,
-                writer::quote_value(value),
-                content
-            );
+    // Schema is best-effort: if the file doesn't exist, no defaults / required
+    // checks apply (today's behaviour). If it exists, we honour the exact-match
+    // collection — prefix matches don't apply because `create` targets a
+    // specific folder.
+    let schema_path = schema::schema_path(&vault.root);
+    if schema_path.is_file() {
+        let vault_schema: VaultSchema = schema::load_schema(&schema_path)
+            .context(format!("loading {}", schema_path.display()))?;
+        if let Some(collection) = vault_schema.collection_for_folder(folder) {
+            builder = builder.with_schema(collection.clone());
         }
     }
 
-    let rel_dest = dest.strip_prefix(&vault.root).unwrap_or(&dest);
-
     if dry_run {
-        println!(
-            "{}",
-            format!("would create: {}", rel_dest.display()).yellow()
-        );
-        println!("\n{}", content);
-    } else {
-        // Create parent directory if needed
-        if let Some(parent) = dest.parent()
-            && !parent.exists()
-        {
-            std::fs::create_dir_all(parent)?;
+        let (report, content) = builder.plan_with_content(vault)?;
+        if !report.errors.is_empty() {
+            for err in &report.errors {
+                let rel_path = err.path.strip_prefix(&vault.root).unwrap_or(&err.path);
+                eprintln!("{} {}: {}", "error:".red(), rel_path.display(), err.message);
+            }
+            anyhow::bail!("create plan failed");
         }
-        std::fs::write(&dest, &content)?;
-        println!("{}", format!("created: {}", rel_dest.display()).green());
+        for change in &report.changes {
+            let rel_path = change
+                .path
+                .strip_prefix(&vault.root)
+                .unwrap_or(&change.path);
+            println!(
+                "{}",
+                format!("would create: {}", rel_path.display()).yellow()
+            );
+            println!("  {}", change.description);
+        }
+        if let Some(c) = content {
+            println!("\n{}", c);
+        }
+    } else {
+        let report = builder.execute(vault)?;
+        if !report.errors.is_empty() {
+            for err in &report.errors {
+                let rel_path = err.path.strip_prefix(&vault.root).unwrap_or(&err.path);
+                eprintln!("{} {}: {}", "error:".red(), rel_path.display(), err.message);
+            }
+            anyhow::bail!("create failed");
+        }
+        for change in &report.changes {
+            let rel_path = change
+                .path
+                .strip_prefix(&vault.root)
+                .unwrap_or(&change.path);
+            println!("{}", format!("created: {}", rel_path.display()).green());
+            println!("  {}", change.description);
+        }
     }
 
     Ok(())

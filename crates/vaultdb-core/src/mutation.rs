@@ -703,6 +703,256 @@ impl RenameBuilder {
     }
 }
 
+// ── CreateBuilder ──────────────────────────────────────────────────────────
+
+/// Build a create mutation. Writes a new `.md` file under `folder` with
+/// name `name` (the `.md` extension is appended automatically).
+///
+/// Frontmatter is composed in three layers, in order of precedence:
+///
+/// 1. Template — if `template(path)` is set, the template's frontmatter
+///    is parsed as the base. Template body is preserved.
+/// 2. `--set` overrides — anything set via `set()` overrides matching
+///    template fields.
+/// 3. Schema defaults — when `with_schema(schema)` is supplied, every
+///    `default:` / `default_expr:` whose field isn't already set by
+///    the template or `--set` is applied.
+///
+/// After composition, schema's `required:` list is checked. Missing
+/// required fields surface as `MutationError`s in the report, with the
+/// file NOT written.
+#[derive(Debug, Clone)]
+pub struct CreateBuilder {
+    folder: String,
+    name: String,
+    template: Option<String>,
+    set_fields: Vec<(String, Value)>,
+    schema: Option<crate::schema::CollectionSchema>,
+    write_options: writer::WriteOptions,
+}
+
+impl CreateBuilder {
+    pub fn new(folder: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            folder: folder.into(),
+            name: name.into(),
+            template: None,
+            set_fields: Vec::new(),
+            schema: None,
+            write_options: writer::WriteOptions::default(),
+        }
+    }
+
+    /// Path to a template file, relative to the vault root. The
+    /// template's frontmatter forms the base of the new note; its body
+    /// is preserved.
+    pub fn template(mut self, path: impl Into<String>) -> Self {
+        self.template = Some(path.into());
+        self
+    }
+
+    /// Set (or override) a frontmatter field. Layered on top of the
+    /// template; layered under schema defaults.
+    pub fn set(mut self, field: impl Into<String>, value: Value) -> Self {
+        self.set_fields.push((field.into(), value));
+        self
+    }
+
+    /// Attach the collection schema for this folder. When set:
+    /// `default:` / `default_expr:` fields are applied for any field
+    /// the user didn't supply, and `required:` is enforced before
+    /// writing.
+    pub fn with_schema(mut self, schema: crate::schema::CollectionSchema) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
+    pub fn write_options(mut self, opts: writer::WriteOptions) -> Self {
+        self.write_options = opts;
+        self
+    }
+
+    pub fn fsync(mut self, yes: bool) -> Self {
+        self.write_options.fsync = yes;
+        self
+    }
+
+    /// Compute the planned change without writing.
+    pub fn plan(&self, vault: &Vault) -> Result<MutationReport> {
+        let (report, _) = self.compute(vault)?;
+        Ok(report)
+    }
+
+    /// Plan and also return the file content that would be written.
+    /// Used by the CLI's `--dry-run` for create — the post-defaults
+    /// frontmatter is the value of the preview.
+    pub fn plan_with_content(&self, vault: &Vault) -> Result<(MutationReport, Option<String>)> {
+        let (report, write) = self.compute(vault)?;
+        Ok((report, write.map(|w| w.modified_content)))
+    }
+
+    /// Plan, then write the file atomically. Holds the vault-scoped
+    /// lock so concurrent creates against the same vault serialise
+    /// cleanly.
+    pub fn execute(self, vault: &Vault) -> Result<MutationReport> {
+        crate::lock::with_lock(&vault.root, || {
+            let (report, write) = self.compute(vault)?;
+            if !report.errors.is_empty() {
+                return Ok(report);
+            }
+            if let Some(w) = write {
+                if let Some(parent) = w.path.parent()
+                    && !parent.exists()
+                {
+                    std::fs::create_dir_all(parent).map_err(VaultdbError::Io)?;
+                }
+                writer::atomic_write_with(&w.path, &w.modified_content, self.write_options)
+                    .map_err(VaultdbError::Io)?;
+            }
+            Ok(report)
+        })
+    }
+
+    fn compute(&self, vault: &Vault) -> Result<(MutationReport, Option<WriteResult>)> {
+        // We DON'T require the folder to exist on disk — create can
+        // make it. `vault.resolve_folder` errors on missing dirs, so
+        // we build the path ourselves and let the writer create the
+        // parent at execute time.
+        let folder_path = vault.root.join(&self.folder);
+        let filename = format!("{}.md", self.name);
+        let dest = folder_path.join(&filename);
+
+        let mut changes = Vec::new();
+        let mut errors = Vec::new();
+
+        if dest.exists() {
+            errors.push(MutationError {
+                path: dest.clone(),
+                message: format!("file already exists: {}", dest.display()),
+            });
+            return Ok((MutationReport { changes, errors }, None));
+        }
+
+        // 1. Template — parse its frontmatter into a typed map, keep
+        //    its body verbatim. No template → empty map + minimal body
+        //    (`# {name}` so the note isn't blank).
+        let (mut fields, body) = match &self.template {
+            Some(tmpl) => {
+                let tmpl_path = vault.root.join(tmpl);
+                if !tmpl_path.is_file() {
+                    errors.push(MutationError {
+                        path: tmpl_path.clone(),
+                        message: format!("template not found: {}", tmpl_path.display()),
+                    });
+                    return Ok((MutationReport { changes, errors }, None));
+                }
+                let raw = std::fs::read_to_string(&tmpl_path).map_err(VaultdbError::Io)?;
+                split_template(&raw)
+            }
+            None => (
+                std::collections::BTreeMap::<String, Value>::new(),
+                format!("\n# {}\n", self.name),
+            ),
+        };
+
+        // 2. --set overrides.
+        for (k, v) in &self.set_fields {
+            fields.insert(k.clone(), v.clone());
+        }
+
+        // 3. Schema defaults (only for unset fields).
+        if let Some(schema) = &self.schema {
+            for (name, fs) in &schema.fields {
+                if fields.contains_key(name) {
+                    continue;
+                }
+                if let Some(default) = &fs.default {
+                    fields.insert(name.clone(), default.clone());
+                } else if let Some(expr) = &fs.default_expr {
+                    match crate::schema::resolve_default_expr(expr) {
+                        Ok(v) => {
+                            fields.insert(name.clone(), v);
+                        }
+                        Err(e) => {
+                            errors.push(MutationError {
+                                path: dest.clone(),
+                                message: format!("resolving default_expr for '{}': {}", name, e),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // 4. Required-field check, AFTER defaults have been applied.
+            for req in &schema.required {
+                let satisfied = matches!(fields.get(req), Some(v) if !matches!(v, Value::Null));
+                if !satisfied {
+                    errors.push(MutationError {
+                        path: dest.clone(),
+                        message: format!("required field missing: '{}'", req),
+                    });
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            return Ok((MutationReport { changes, errors }, None));
+        }
+
+        // 5. Render frontmatter + body. serde_yaml emits an unprefixed
+        //    mapping; we wrap with `---` delimiters. Empty field map
+        //    still gets `---\n---\n` so consumers can find a parse anchor.
+        let frontmatter_yaml = if fields.is_empty() {
+            String::new()
+        } else {
+            serde_yaml::to_string(&fields)
+                .map_err(|e| VaultdbError::SchemaError(format!("rendering frontmatter: {}", e)))?
+        };
+        let content = if frontmatter_yaml.is_empty() {
+            format!("---\n---\n{}", body)
+        } else {
+            format!("---\n{}---\n{}", frontmatter_yaml, body)
+        };
+
+        let field_count = fields.len();
+        let field_summary: String = fields.keys().cloned().collect::<Vec<_>>().join(", ");
+        let description = if field_count == 0 {
+            "create (no frontmatter fields)".to_string()
+        } else {
+            format!("create with {} field(s): {}", field_count, field_summary)
+        };
+
+        changes.push(PlannedChange {
+            path: dest.clone(),
+            description,
+        });
+
+        let write = WriteResult {
+            path: dest,
+            original_content: String::new(),
+            modified_content: content,
+            changes: Vec::new(),
+        };
+
+        Ok((MutationReport { changes, errors }, Some(write)))
+    }
+}
+
+/// Parse a template's frontmatter + body into a typed field map and
+/// the verbatim body string. Returns an empty map + the whole raw
+/// content as body when the template has no frontmatter delimiters.
+fn split_template(raw: &str) -> (std::collections::BTreeMap<String, Value>, String) {
+    use crate::frontmatter::{extract_frontmatter, parse_frontmatter};
+    match extract_frontmatter(raw) {
+        Some((yaml_text, body_start)) => {
+            let fields = parse_frontmatter(yaml_text).unwrap_or_default();
+            let body = raw[body_start..].to_string();
+            (fields, body)
+        }
+        None => (std::collections::BTreeMap::new(), raw.to_string()),
+    }
+}
+
 /// Rewrite `[[from]]` (and `[[from|alias]]`, `[[from#section]]`,
 /// `[[from#section|alias]]`) to point at `to`.
 pub(crate) fn rewrite_wikilinks(content: &str, from: &str, to: &str) -> String {
@@ -1211,5 +1461,257 @@ mod tests {
             "expected no tempfile leftovers, found: {:?}",
             leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
         );
+    }
+
+    // ── Phase 3: CreateBuilder ────────────────────────────────────────
+
+    use crate::schema::{CollectionSchema, FieldSchema};
+
+    fn movie_schema() -> CollectionSchema {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "db-table".into(),
+            FieldSchema {
+                field_type: "string".into(),
+                enum_values: vec![Value::String("movie".into())],
+                min: None,
+                max: None,
+                default: Some(Value::String("movie".into())),
+                default_expr: None,
+            },
+        );
+        fields.insert(
+            "status".into(),
+            FieldSchema {
+                field_type: "string".into(),
+                enum_values: vec![
+                    Value::String("to-watch".into()),
+                    Value::String("watched".into()),
+                ],
+                min: None,
+                max: None,
+                default: Some(Value::String("to-watch".into())),
+                default_expr: None,
+            },
+        );
+        fields.insert(
+            "director".into(),
+            FieldSchema {
+                field_type: "string".into(),
+                enum_values: vec![],
+                min: None,
+                max: None,
+                default: None,
+                default_expr: None,
+            },
+        );
+        fields.insert(
+            "year".into(),
+            FieldSchema {
+                field_type: "integer".into(),
+                enum_values: vec![],
+                min: None,
+                max: None,
+                default: None,
+                default_expr: None,
+            },
+        );
+        CollectionSchema {
+            description: None,
+            folder: "Notes/movie".into(),
+            filter: vec![],
+            required: vec![
+                "db-table".into(),
+                "director".into(),
+                "status".into(),
+                "year".into(),
+            ],
+            fields,
+        }
+    }
+
+    fn vault_with_obsidian() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn create_without_schema_writes_minimal_file() {
+        let dir = vault_with_obsidian();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let report = CreateBuilder::new("Notes/movie", "Dune")
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(report.errors.len(), 0);
+        assert_eq!(report.changes.len(), 1);
+        let written = dir.path().join("Notes/movie/Dune.md");
+        assert!(written.is_file());
+        let content = std::fs::read_to_string(&written).unwrap();
+        // Empty frontmatter + "# Dune" body.
+        assert!(content.contains("---\n---"));
+        assert!(content.contains("# Dune"));
+    }
+
+    #[test]
+    fn create_with_set_writes_typed_frontmatter() {
+        let dir = vault_with_obsidian();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        CreateBuilder::new("Notes/movie", "Dune")
+            .set("director", Value::String("Denis Villeneuve".into()))
+            .set("year", Value::Integer(2021))
+            .execute(&vault)
+            .unwrap();
+        let content = std::fs::read_to_string(dir.path().join("Notes/movie/Dune.md")).unwrap();
+        assert!(content.contains("director: Denis Villeneuve"));
+        // YAML int rendering — no quotes.
+        assert!(content.contains("year: 2021"));
+    }
+
+    #[test]
+    fn create_fills_schema_defaults() {
+        let dir = vault_with_obsidian();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        CreateBuilder::new("Notes/movie", "Dune")
+            .with_schema(movie_schema())
+            .set("director", Value::String("Denis Villeneuve".into()))
+            .set("year", Value::Integer(2021))
+            .execute(&vault)
+            .unwrap();
+        let content = std::fs::read_to_string(dir.path().join("Notes/movie/Dune.md")).unwrap();
+        // Defaults applied.
+        assert!(content.contains("db-table: movie"));
+        assert!(content.contains("status: to-watch"));
+        // User-supplied values preserved.
+        assert!(content.contains("director: Denis Villeneuve"));
+        assert!(content.contains("year: 2021"));
+    }
+
+    #[test]
+    fn create_set_overrides_default() {
+        let dir = vault_with_obsidian();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        CreateBuilder::new("Notes/movie", "Watched")
+            .with_schema(movie_schema())
+            .set("director", Value::String("X".into()))
+            .set("year", Value::Integer(2020))
+            .set("status", Value::String("watched".into()))
+            .execute(&vault)
+            .unwrap();
+        let content = std::fs::read_to_string(dir.path().join("Notes/movie/Watched.md")).unwrap();
+        assert!(content.contains("status: watched"));
+        assert!(!content.contains("status: to-watch"));
+    }
+
+    #[test]
+    fn create_rejects_missing_required_before_writing() {
+        let dir = vault_with_obsidian();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        // No director / year → required check should fail.
+        let report = CreateBuilder::new("Notes/movie", "Blank")
+            .with_schema(movie_schema())
+            .execute(&vault)
+            .unwrap();
+        assert!(!report.errors.is_empty());
+        assert!(report.errors.iter().any(|e| e.message.contains("director")));
+        assert!(report.errors.iter().any(|e| e.message.contains("year")));
+        // File must NOT have been written.
+        assert!(!dir.path().join("Notes/movie/Blank.md").exists());
+    }
+
+    #[test]
+    fn create_rejects_existing_file() {
+        let dir = vault_with_obsidian();
+        std::fs::create_dir_all(dir.path().join("Notes/movie")).unwrap();
+        std::fs::write(dir.path().join("Notes/movie/Dune.md"), "existing\n").unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let report = CreateBuilder::new("Notes/movie", "Dune")
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].message.contains("already exists"));
+        // Original file preserved.
+        let content = std::fs::read_to_string(dir.path().join("Notes/movie/Dune.md")).unwrap();
+        assert_eq!(content, "existing\n");
+    }
+
+    #[test]
+    fn create_resolves_default_expr_today() {
+        let dir = vault_with_obsidian();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "due".into(),
+            FieldSchema {
+                field_type: "date".into(),
+                enum_values: vec![],
+                min: None,
+                max: None,
+                default: None,
+                default_expr: Some("today".into()),
+            },
+        );
+        let schema = CollectionSchema {
+            description: None,
+            folder: "tasks".into(),
+            filter: vec![],
+            required: vec![],
+            fields,
+        };
+        CreateBuilder::new("tasks", "t1")
+            .with_schema(schema)
+            .execute(&vault)
+            .unwrap();
+        let content = std::fs::read_to_string(dir.path().join("tasks/t1.md")).unwrap();
+        // Match shape, not exact value (date depends on when test runs).
+        let today = crate::record::today_string();
+        assert!(
+            content.contains(&format!("due: {}", today)),
+            "expected due={} in: {}",
+            today,
+            content
+        );
+    }
+
+    #[test]
+    fn create_plan_does_not_touch_disk() {
+        let dir = vault_with_obsidian();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let (report, content) = CreateBuilder::new("Notes/movie", "Dune")
+            .with_schema(movie_schema())
+            .set("director", Value::String("DV".into()))
+            .set("year", Value::Integer(2021))
+            .plan_with_content(&vault)
+            .unwrap();
+        assert_eq!(report.errors.len(), 0);
+        assert_eq!(report.changes.len(), 1);
+        assert!(!dir.path().join("Notes/movie/Dune.md").exists());
+        let c = content.unwrap();
+        assert!(c.contains("director: DV"));
+        assert!(c.contains("db-table: movie")); // default applied even in plan
+    }
+
+    #[test]
+    fn create_from_template_preserves_body_and_merges_frontmatter() {
+        let dir = vault_with_obsidian();
+        std::fs::create_dir_all(dir.path().join("templates")).unwrap();
+        std::fs::write(
+            dir.path().join("templates/movie.md"),
+            "---\nstatus: to-watch\naliases: []\n---\n\n# Title\n\nReview goes here.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        CreateBuilder::new("Notes/movie", "Dune")
+            .template("templates/movie.md")
+            .set("year", Value::Integer(2021))
+            .execute(&vault)
+            .unwrap();
+        let content = std::fs::read_to_string(dir.path().join("Notes/movie/Dune.md")).unwrap();
+        // Template field preserved.
+        assert!(content.contains("status: to-watch"));
+        // --set added.
+        assert!(content.contains("year: 2021"));
+        // Body preserved.
+        assert!(content.contains("Review goes here"));
     }
 }
