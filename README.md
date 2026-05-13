@@ -204,6 +204,38 @@ vaultdb query 3-Notes --where '_body matches "^# Conclusion"'
 
 Body content is loaded only when a body predicate is referenced; queries that don't need it stay on the fast frontmatter-only path.
 
+### Export query results to a file
+
+Use `--output <vault-relative path>` to save results into the vault. The
+format is inferred from the extension — `.csv`, `.tsv`, `.json`,
+`.yaml`/`.yml`, `.xlsx` are all supported. The path must stay inside the
+vault; absolute paths, `..` escapes, and `.md` extensions are rejected.
+
+```bash
+# CSV (default delimiter is comma)
+vaultdb query 3-Notes --where "tags contains topic/ai" --output exports/ai-notes.csv
+
+# Semicolon-delimited CSV (European convention)
+vaultdb query 3-Notes --output exports/ai.csv --csv-delimiter semicolon
+
+# Tab-separated; .tsv extension also forces tab by default
+vaultdb query 3-Notes --output exports/ai.tsv
+
+# JSON / YAML
+vaultdb query 3-Notes --where "tags contains topic/ai" --output exports/ai.json
+vaultdb query 3-Notes --where "tags contains topic/ai" --output exports/ai.yaml
+
+# XLSX — typed cells (numbers as numbers, booleans as booleans)
+vaultdb query 3-Notes --where "tags contains topic/ai" --output exports/ai.xlsx
+```
+
+On filename collision the file is auto-suffixed `(1)`, `(2)`, ... — no
+overwrite mode by design. When `--output` is set, the resolved path is
+printed and stdout no longer carries the result body. The same renderer
+powers MCP's `export` parameter on every read tool (see below), so a
+CLI export and an MCP export of the same query produce byte-identical
+files.
+
 ### Create
 
 ```bash
@@ -422,9 +454,9 @@ Wire it into Claude Desktop's config (`~/.config/claude/claude_desktop_config.js
 
 Tools exposed:
 
-**Read** — `query`, `find_by_name`, `list_folders`, `links`, `traverse`, `unresolved`.
+**Read** — `query`, `find_by_name`, `list_folders`, `links`, `traverse`, `unresolved`. Every read tool also accepts `export: "<vault-relative path>"` and `csv_delimiter: "comma" | "semicolon" | "tab"` — when `export` is set, the result is also written to a file under the vault (same path-safety rules as the CLI's `--output`) and the response is wrapped as `{ "data": <result>, "exported_to": "<path>" }`. When `export` is unset, the response shape is unchanged.
 
-**Schema** — `schema_show`, `schema_infer`.
+**Schema** — `schema_show`, `schema_infer`. Both also accept `export` — use `.json` or `.yaml` for these since the schema shape isn't tabular.
 
 **Plan-only mutation** (preview, never writes) — `plan_create`, `plan_update`, `plan_delete`, `plan_move`, `plan_rename`. Default flow: agents propose, you approve, hosts execute.
 

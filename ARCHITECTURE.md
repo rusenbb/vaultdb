@@ -79,6 +79,8 @@ The following are part of the public contract:
 - `LinkGraph`, `Direction`, `GraphScope`, `UnresolvedLink`
 - `CreateBuilder`, `UpdateBuilder`, `DeleteBuilder`, `MoveBuilder`, `RenameBuilder` and
   their `MutationReport` / `PlannedChange` / `MutationError` types
+- `render::Format` (re-exported as `ExportFormat`), `render::export_records`,
+  `render::export_value`, `render::resolve_export_path`
 - `LoadResult`, `ParseError`
 - `VaultdbError` (the variants are part of the contract; only
   additions are non-breaking)

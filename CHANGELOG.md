@@ -5,6 +5,95 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] — Vault-scoped export for CLI and MCP
+
+The headline: every read path can now save its results to a file under
+the vault root. One renderer in `vaultdb-core::render`, three call
+sites (CLI, MCP, the future bindings), and the same path-safety rules
+everywhere.
+
+### Added — `vaultdb-core::render`
+
+- New public module. Public API: `Format::{Csv { delimiter }, Xlsx,
+  Json, Yaml}`, `Format::from_path` for extension inference,
+  `resolve_export_path` (vault-scoped sandbox + auto-suffix on
+  collision), `export_records` for record-shaped data, `export_value`
+  for arbitrary serde-serializable values.
+- Re-exported from the crate root as `ExportFormat`, `export_records`,
+  `export_value`, `resolve_export_path`.
+- New `xlsx` Cargo feature, default off. Pulls in `rust_xlsxwriter`
+  only when enabled. The CLI and MCP binaries enable it; wasm / pyo3
+  bindings choose.
+- `csv` is now a `vaultdb-core` direct dep (was previously only in the
+  CLI). Its dep tree is small enough to be on by default.
+
+### Path safety
+
+- All exports land **inside the vault root**. Absolute paths and `..`
+  components are rejected at the boundary; symlink escapes are caught
+  by canonicalize-parent + `starts_with(canonical_vault)`.
+- `.md` is rejected — that's the vault's note format, not an export
+  format.
+- On filename collision the renderer auto-suffixes `(1)`, `(2)`, ...
+  No overwrite mode, by design — agents shouldn't be able to clobber
+  vault notes via a misaimed export path.
+- Writes are atomic (tempfile-in-same-dir + rename), same shape as
+  `writer::atomic_write`.
+
+### Added — CLI: `vaultdb query --output <path>`
+
+- New global flag on the `query` subcommand. Path is vault-relative,
+  format inferred from extension (`.csv`, `.tsv`, `.json`, `.yaml`/
+  `.yml`, `.xlsx`). When set, results are written to the file and the
+  resolved path is printed; stdout no longer carries the result body.
+- `--csv-delimiter {comma,semicolon,tab}` overrides the default for
+  `.csv` and `.tsv` exports.
+- The CLI no longer carries its own CSV/JSON/YAML formatters. `output.rs`
+  shrank to just the comfy-table pretty-printer + a delegation shim
+  into `vaultdb_core::render::render_records`.
+- The CLI's direct `csv` dep is dropped — it reaches the writer through
+  `vaultdb-core` now.
+
+### Added — MCP: `export` parameter on all 8 read tools
+
+- `query`, `find_by_name`, `list_folders`, `links`, `traverse`,
+  `unresolved`, `schema_show`, `schema_infer` accept two new optional
+  parameters via a flattened `ExportOptions`:
+  - `export: "<vault-relative path>"`
+  - `csv_delimiter: "comma" | "semicolon" | "tab"` (also accepts the
+    literal characters `,` / `;` / `\t`)
+- Response shape: when `export` is unset, tools return their existing
+  shape (no change for current MCP clients). When `export` is set, the
+  response is wrapped: `{ "data": <result>, "exported_to": "<path>" }`.
+- Record-shaped tools (`query`, `find_by_name`) route through
+  `render::export_records` to preserve virtual fields (`_name`,
+  `_path`, `_backlink_count`, ...) — the file matches what
+  `vaultdb query --output` would have written.
+- Other tools route through `render::export_value`. JSON / YAML work
+  for any shape; CSV / XLSX work for tabular shapes (array of objects,
+  array of scalars, single object) and return a typed error otherwise.
+- The vault is not modified — `export` is a read-only side effect that
+  writes a fresh file inside the vault root. No new
+  `--dangerously-allow-*` flag is needed.
+
+### Removed
+
+- XLS (the legacy binary Excel format pre-2007) is **not** supported.
+  No maintained pure-Rust writer exists for it; FFI to a C/Java library
+  would break the "pure-Rust, `cargo install` just works" property of
+  the CLI. Anything that opens `.xls` in 2026 almost certainly also
+  opens `.xlsx`.
+
+### Tests
+
+- 30 inline tests in `render.rs` cover extension inference per format,
+  path-escape rejection (absolute, `..`, deep `..`), `.md` refusal,
+  auto-suffix on collision, every format round-trip, CSV delimiter
+  variants, XLSX magic-byte verification, and the three non-record
+  shapes (array of objects, array of scalars, non-tabular refusal).
+- 6 new MCP smoke tests cover the happy paths and rejection cases
+  end-to-end through the JSON-RPC layer.
+
 ## [1.1.1] — Boolean literal support in CLI / DSL string paths
 
 ### Fixed
