@@ -22,7 +22,9 @@ use crate::value::value_to_json;
 ///   through serde, which is what `#[derive(Note)]` relies on.
 pub trait Note: Sized + Serialize + DeserializeOwned {
     /// The folder, relative to the vault root, that holds records of
-    /// this type.
+    /// this type. Empty (`""`) means "anywhere under the vault root" —
+    /// useful when the type is discriminated by tag rather than folder,
+    /// and the host application picks the data folder at runtime.
     const FOLDER: &'static str;
 
     /// An optional filter applied implicitly to every query of this
@@ -32,6 +34,25 @@ pub trait Note: Sized + Serialize + DeserializeOwned {
     /// Default: no discriminator.
     fn discriminator() -> Option<Expr> {
         None
+    }
+
+    /// Name of the collection in `<vault>/vaultdb-schema.yaml` that
+    /// declares this model's shape. When set, `Create::<T>::new` and
+    /// other consumers can auto-resolve the matching `CollectionSchema`
+    /// for default-application and required-field checks.
+    ///
+    /// Default: `None` — auto-resolution disabled; callers attach a
+    /// schema manually via `.with_schema(...)` if they want it.
+    fn collection() -> Option<&'static str> {
+        None
+    }
+
+    /// Field names this model declares in frontmatter (minus
+    /// relations). Used by consistency-check helpers — defaults to an
+    /// empty slice for hand-written impls; `#[derive(Note)]` generates
+    /// the right list automatically.
+    fn field_names() -> &'static [&'static str] {
+        &[]
     }
 
     /// Parse a [`Record`] into `Self`.

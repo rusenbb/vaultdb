@@ -3,7 +3,8 @@
 //! `#[derive(Note)]` reads `#[note(...)]` attributes on the struct and
 //! emits:
 //!
-//! - An `impl vaultdb_orm::Note` block (folder + optional discriminator).
+//! - An `impl vaultdb_orm::Note` block with `FOLDER`, optional
+//!   `discriminator()`, optional `collection()`, and `field_names()`.
 //! - One `pub fn <field>()` accessor per struct field, returning either
 //!   a `FieldRef` (for plain frontmatter fields) or a `RelationRef`
 //!   (for fields marked with `#[note(wikilink)]` / `#[note(backlink)]`).
@@ -12,10 +13,18 @@
 //!
 //! Supported struct-level keys:
 //!
-//! - `#[note(folder = "...")]` (required) — the vault folder for this
-//!   model.
-//! - `#[note(filter = "...")]` (optional) — a where-DSL filter parsed
-//!   at runtime and applied as the discriminator.
+//! - `#[note(folder = "...")]` — vault folder for this model. Required
+//!   UNLESS `discriminator` is given, in which case folder defaults to
+//!   `""` (anywhere under the vault root) for tag-discriminated models.
+//! - `#[note(discriminator = "...")]` — where-DSL filter parsed at
+//!   runtime and applied implicitly to every query. Replaces and is
+//!   preferred over the legacy `filter` alias below.
+//! - `#[note(filter = "...")]` — legacy alias for `discriminator`. Both
+//!   work; new code should use `discriminator`.
+//! - `#[note(collection = "...")]` — name of the matching collection
+//!   in `<vault>/vaultdb-schema.yaml`. When set, `Create::<T>::new`
+//!   auto-resolves the schema (defaults + required-field enforcement)
+//!   without an explicit `.with_schema(...)` call.
 //!
 //! Supported field-level keys:
 //!
@@ -36,7 +45,11 @@ pub fn derive_note(input: TokenStream) -> TokenStream {
     let name = input.ident.clone();
 
     let mut folder: Option<LitStr> = None;
+    // `filter` is the legacy name for `discriminator` — both are
+    // accepted, `discriminator` is preferred for new code.
     let mut filter: Option<LitStr> = None;
+    let mut discriminator: Option<LitStr> = None;
+    let mut collection: Option<LitStr> = None;
 
     for attr in &input.attrs {
         if !attr.path().is_ident("note") {
@@ -47,8 +60,14 @@ pub fn derive_note(input: TokenStream) -> TokenStream {
                 folder = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("filter") {
                 filter = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("discriminator") {
+                discriminator = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("collection") {
+                collection = Some(meta.value()?.parse()?);
             } else {
-                return Err(meta.error("unknown #[note(...)] key — expected `folder` or `filter`"));
+                return Err(meta.error(
+                    "unknown #[note(...)] key — expected `folder`, `filter`, `discriminator`, or `collection`",
+                ));
             }
             Ok(())
         });
@@ -57,22 +76,38 @@ pub fn derive_note(input: TokenStream) -> TokenStream {
         }
     }
 
-    let folder_lit = match folder {
-        Some(f) => f,
-        None => {
+    // Folder defaults to "" (anywhere in vault) when a discriminator is
+    // given — that's the eduport-style "tag-discriminated, host picks
+    // the data folder" pattern.
+    let folder_lit: LitStr = match (folder, &discriminator, &filter) {
+        (Some(f), _, _) => f,
+        (None, Some(_), _) | (None, _, Some(_)) => LitStr::new("", proc_macro2::Span::call_site()),
+        (None, None, None) => {
             return syn::Error::new_spanned(
                 &name,
-                "missing required #[note(folder = \"...\")] on derive(Note)",
+                "missing required #[note(folder = \"...\")] or #[note(discriminator = \"...\")] on derive(Note)",
             )
             .to_compile_error()
             .into();
         }
     };
 
-    let discriminator_impl = match filter {
-        Some(f) => quote! {
+    // Prefer `discriminator` over `filter` when both are given. Either
+    // produces the same `Note::discriminator()` impl.
+    let discriminator_source = discriminator.or(filter);
+    let discriminator_impl = match discriminator_source {
+        Some(d) => quote! {
             fn discriminator() -> ::core::option::Option<::vaultdb_orm::Expr> {
-                ::vaultdb_orm::Expr::parse(#f).ok()
+                ::vaultdb_orm::Expr::parse(#d).ok()
+            }
+        },
+        None => quote! {},
+    };
+
+    let collection_impl = match collection {
+        Some(c) => quote! {
+            fn collection() -> ::core::option::Option<&'static str> {
+                ::core::option::Option::Some(#c)
             }
         },
         None => quote! {},
@@ -85,10 +120,25 @@ pub fn derive_note(input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
+    // Static slice of frontmatter field names this model declares —
+    // used by `Note::field_names()` for schema-consistency helpers.
+    // Skips relation-marker fields (`#[note(wikilink)]` / `backlink`).
+    let field_name_strs = match field_name_strings(&input.data) {
+        Ok(strs) => strs,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let field_names_impl = quote! {
+        fn field_names() -> &'static [&'static str] {
+            &[ #( #field_name_strs ),* ]
+        }
+    };
+
     let expanded = quote! {
         impl ::vaultdb_orm::Note for #name {
             const FOLDER: &'static str = #folder_lit;
             #discriminator_impl
+            #collection_impl
+            #field_names_impl
         }
 
         impl #name {
@@ -97,6 +147,36 @@ pub fn derive_note(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+fn field_name_strings(data: &Data) -> syn::Result<Vec<String>> {
+    let fields = match data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Named(named) => &named.named,
+            _ => return Ok(Vec::new()),
+        },
+        _ => return Ok(Vec::new()),
+    };
+
+    let mut out = Vec::new();
+    for f in fields {
+        let ident = match &f.ident {
+            Some(i) => i,
+            None => continue,
+        };
+        // Skip relation-marker fields — they aren't frontmatter.
+        if relation_kind(f)?.is_some() {
+            continue;
+        }
+        let key = serde_rename(f).unwrap_or_else(|| ident.to_string());
+        // Skip the synthetic virtual field renames (`_name`, etc.) —
+        // schema consistency cares about frontmatter, not virtuals.
+        if key.starts_with('_') {
+            continue;
+        }
+        out.push(key);
+    }
+    Ok(out)
 }
 
 fn field_accessors(data: &Data) -> syn::Result<proc_macro2::TokenStream> {

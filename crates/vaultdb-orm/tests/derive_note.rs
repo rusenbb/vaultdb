@@ -20,6 +20,27 @@ struct Filtered {
     year: i32,
 }
 
+// Phase 6 — discriminator-only model (folder defaults to "").
+#[derive(Debug, Serialize, Deserialize, Note)]
+#[note(discriminator = "tags contains eduport-type/person")]
+struct Person {
+    #[serde(rename = "_name")]
+    name: String,
+    role: String,
+    #[allow(dead_code)]
+    university: String,
+}
+
+// Phase 6 — collection-named model.
+#[derive(Debug, Serialize, Deserialize, Note)]
+#[note(folder = "Notes/movie", collection = "movies")]
+struct Movie {
+    #[serde(rename = "_name")]
+    title: String,
+    director: String,
+    year: i32,
+}
+
 #[test]
 fn derive_emits_folder_const() {
     assert_eq!(<Plain as Note>::FOLDER, "notes");
@@ -36,6 +57,35 @@ fn derive_with_filter_parses_at_runtime() {
     let disc = <Filtered as Note>::discriminator().expect("expected discriminator");
     let manual = Expr::parse("tags contains type/paper").unwrap();
     assert_eq!(disc, manual);
+}
+
+#[test]
+fn derive_with_discriminator_only_defaults_folder_to_empty() {
+    assert_eq!(<Person as Note>::FOLDER, "");
+    let disc = <Person as Note>::discriminator().expect("expected discriminator");
+    let manual = Expr::parse("tags contains eduport-type/person").unwrap();
+    assert_eq!(disc, manual);
+}
+
+#[test]
+fn collection_attribute_defaults_to_none() {
+    assert!(<Plain as Note>::collection().is_none());
+    assert!(<Filtered as Note>::collection().is_none());
+    assert!(<Person as Note>::collection().is_none());
+}
+
+#[test]
+fn collection_attribute_sets_collection_name() {
+    assert_eq!(<Movie as Note>::collection(), Some("movies"));
+}
+
+#[test]
+fn field_names_lists_struct_fields_minus_virtuals() {
+    // _name maps to a virtual field — excluded.
+    let names = <Movie as Note>::field_names();
+    assert!(names.contains(&"director"));
+    assert!(names.contains(&"year"));
+    assert!(!names.iter().any(|n| n.starts_with('_')));
 }
 
 #[test]

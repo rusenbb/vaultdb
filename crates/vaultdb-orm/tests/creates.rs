@@ -152,3 +152,52 @@ fn typed_create_plan_returns_content_without_writing() {
     assert!(!dir.path().join("Notes/movie/Dune.md").exists());
     assert!(content.unwrap().contains("status: to-watch"));
 }
+
+// Phase 6: when `#[note(collection = "...")]` is set AND the vault has
+// a vaultdb-schema.yaml declaring that collection, Create<T> attaches
+// it automatically. No explicit .with_schema() call required.
+#[derive(Debug, Clone, Serialize, Deserialize, Note)]
+#[note(folder = "Notes/movie", collection = "movies")]
+#[allow(dead_code)]
+struct AutoMovie {
+    #[serde(rename = "_name")]
+    title: String,
+    director: String,
+    year: i32,
+}
+
+#[test]
+fn create_auto_resolves_schema_when_collection_is_set() {
+    let (dir, vault) = vault();
+    // Write a schema YAML that defines defaults for the movies collection.
+    fs::write(
+        dir.path().join("vaultdb-schema.yaml"),
+        r#"
+collections:
+  movies:
+    folder: Notes/movie
+    required: [director, year]
+    fields:
+      db-table:
+        type: string
+        enum: [movie]
+        default: movie
+      status:
+        type: string
+        default: to-watch
+      director: { type: string }
+      year: { type: integer }
+"#,
+    )
+    .unwrap();
+
+    Create::<AutoMovie>::new(&vault, "Dune")
+        .set(AutoMovie::director(), "DV")
+        .set(AutoMovie::year(), 2021_i64)
+        .execute()
+        .unwrap();
+    let content = fs::read_to_string(dir.path().join("Notes/movie/Dune.md")).unwrap();
+    // The defaults declared in YAML applied — no explicit .with_schema() needed.
+    assert!(content.contains("db-table: movie"));
+    assert!(content.contains("status: to-watch"));
+}

@@ -15,7 +15,7 @@
 
 use std::marker::PhantomData;
 
-use vaultdb_core::schema::CollectionSchema;
+use vaultdb_core::schema::{self, CollectionSchema};
 use vaultdb_core::{CreateBuilder as CoreCreateBuilder, MutationReport, Value, Vault};
 
 use crate::error::Result;
@@ -31,10 +31,29 @@ pub struct Create<'v, T: Note> {
 impl<'v, T: Note> Create<'v, T> {
     /// Start a typed create for `T` named `name` (the `.md` extension
     /// is appended automatically). Folder defaults to `T::FOLDER`.
+    ///
+    /// When `T::collection()` returns `Some(name)` AND
+    /// `<vault>/vaultdb-schema.yaml` exists with a matching collection,
+    /// the schema is auto-attached — `default:` / `default_expr:` and
+    /// `required:` start applying without an explicit
+    /// `.with_schema(...)` call. Failures to load the schema are
+    /// silently swallowed (the builder still works without it);
+    /// callers that want to surface bad schema files should call
+    /// `schema::load_schema` themselves at startup.
     pub fn new(vault: &'v Vault, name: impl Into<String>) -> Self {
+        let mut builder = CoreCreateBuilder::new(T::FOLDER, name);
+        if let Some(collection_name) = T::collection() {
+            let path = schema::schema_path(&vault.root);
+            if path.is_file()
+                && let Ok(s) = schema::load_schema(&path)
+                && let Some(c) = s.collections.get(collection_name)
+            {
+                builder = builder.with_schema(c.clone());
+            }
+        }
         Self {
             vault,
-            inner: CoreCreateBuilder::new(T::FOLDER, name),
+            inner: builder,
             _marker: PhantomData,
         }
     }
