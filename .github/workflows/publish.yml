@@ -1,10 +1,8 @@
 name: Publish to crates.io
 
 # Triggers when a tag matching `v*` is pushed (e.g. `v1.0.0`,
-# `v1.0.1`). Gated behind the `production` GitHub Environment so
-# the workflow pauses for a one-click approval before running
-# `cargo publish` — protects against accidental tag pushes from
-# a bad branch.
+# `v1.0.1`). Publishes directly — pushing a tag IS the approval.
+# Don't push tags from branches you don't intend to release.
 #
 # Order: vaultdb-core first (it's the dep root), then a wait for
 # the crates.io index to settle, then vaultdb-mcp and vaultdb
@@ -29,10 +27,6 @@ jobs:
   publish-core:
     name: publish vaultdb-core
     runs-on: ubuntu-22.04
-    # The `production` environment requires manual approval the
-    # first time it's used. Every subsequent run uses the same
-    # approval workflow until you change the protection rules.
-    environment: production
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,7 +52,6 @@ jobs:
     name: publish ${{ matrix.crate }}
     needs: wait-for-index
     runs-on: ubuntu-22.04
-    environment: production
     strategy:
       fail-fast: false
       matrix:
