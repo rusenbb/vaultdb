@@ -4,6 +4,7 @@
 //! public mutation builders in [`crate::mutation`] wrap these.
 
 use crate::error::{Result, VaultdbError};
+use crate::record::Value;
 
 /// Describes a single change made to a file.
 #[derive(Debug)]
@@ -332,6 +333,121 @@ pub fn set_field(content: &str, key: &str, value: &str) -> Result<(String, Chang
             field: key.to_string(),
             old_value: String::new(),
             new_value: value.to_string(),
+        };
+
+        Ok((reassemble(&result_lines, body, content), change))
+    }
+}
+
+/// Set a field to a `Value::List` or `Value::Map`, emitting block-style YAML
+/// across multiple lines.
+///
+/// Use [`set_field`] for scalars. This function is the structured counterpart:
+/// it preserves the typed shape of the value through the write rather than
+/// flattening it to a quoted string scalar.
+///
+/// Behavior:
+/// - Key absent → insert the rendered block before the closing `---`.
+/// - Key present as a block-style list/map → replace the multi-line span.
+/// - Key present as a scalar → replace the single line with the block.
+/// - Key present as flow-style (`[a, b]`) or a multiline scalar (`|`, `>`):
+///   refuses with `InvalidFrontmatter`, matching [`set_field`]'s stance —
+///   we won't try to round-trip those styles.
+pub fn set_field_block(
+    content: &str,
+    key: &str,
+    value: &Value,
+) -> Result<(String, ChangeDescription)> {
+    if !matches!(value, Value::List(_) | Value::Map(_)) {
+        return Err(VaultdbError::InvalidFrontmatter {
+            file: String::new(),
+            reason: format!(
+                "set_field_block called with a scalar value for '{}'; use set_field instead",
+                key
+            ),
+        });
+    }
+
+    let (fm_lines, body) = split_frontmatter(content)?;
+
+    // Render `{key: value}` as YAML so the key sits at column 0 and the
+    // contents indent below it. Splitting by lines gives us the block we
+    // splice into the frontmatter.
+    let mut wrapper: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    wrapper.insert(key.to_string(), value.clone());
+    let rendered =
+        serde_yaml::to_string(&wrapper).map_err(|e| VaultdbError::InvalidFrontmatter {
+            file: String::new(),
+            reason: format!("rendering '{}' as YAML: {}", key, e),
+        })?;
+    let new_lines: Vec<String> = rendered.lines().map(String::from).collect();
+    let new_value_summary = serde_yaml::to_string(value)
+        .map(|s| s.trim_end().to_string())
+        .unwrap_or_default();
+
+    if let Some(key_idx) = find_key_line(&fm_lines, key) {
+        if is_flow_style_list(fm_lines[key_idx]) {
+            return Err(VaultdbError::InvalidFrontmatter {
+                file: String::new(),
+                reason: format!(
+                    "field '{}' uses flow-style YAML (e.g., [a, b]). Use --unset first, then re-add.",
+                    key
+                ),
+            });
+        }
+
+        if is_multiline_scalar(fm_lines[key_idx]) {
+            return Err(VaultdbError::InvalidFrontmatter {
+                file: String::new(),
+                reason: format!(
+                    "field '{}' uses a multiline scalar (| or >). Use --unset first, then re-add.",
+                    key
+                ),
+            });
+        }
+
+        let extent = field_extent(&fm_lines, key_idx);
+        // Old value summary: either the inline scalar (extent == 1) or the
+        // joined block (extent > 1). Used for ChangeDescription only.
+        let old_value = if extent == 1 {
+            fm_lines[key_idx]
+                .find(':')
+                .map(|pos| fm_lines[key_idx][pos + 1..].trim().to_string())
+                .unwrap_or_default()
+        } else {
+            fm_lines[key_idx..key_idx + extent].join("\n")
+        };
+
+        let mut result_lines: Vec<String> = Vec::new();
+        for line in &fm_lines[..key_idx] {
+            result_lines.push((*line).to_string());
+        }
+        result_lines.extend(new_lines.iter().cloned());
+        for line in &fm_lines[key_idx + extent..] {
+            result_lines.push((*line).to_string());
+        }
+
+        let change = ChangeDescription::SetField {
+            field: key.to_string(),
+            old_value,
+            new_value: new_value_summary,
+        };
+
+        Ok((reassemble(&result_lines, body, content), change))
+    } else {
+        // Key doesn't exist — insert the block before the closing ---.
+        let mut result_lines: Vec<String> = Vec::new();
+        for (i, line) in fm_lines.iter().enumerate() {
+            if i == fm_lines.len() - 1 && line.trim() == "---" {
+                result_lines.extend(new_lines.iter().cloned());
+            }
+            result_lines.push((*line).to_string());
+        }
+
+        let change = ChangeDescription::SetField {
+            field: key.to_string(),
+            old_value: String::new(),
+            new_value: new_value_summary,
         };
 
         Ok((reassemble(&result_lines, body, content), change))
@@ -679,6 +795,92 @@ Body text.
     fn set_value_needing_quotes() {
         let (result, _) = set_field(MOVIE_FILE, "note", "key: value").unwrap();
         assert!(result.contains("note: 'key: value'"));
+    }
+
+    // ── set_field_block (typed list/map writes) ──────────────────────────
+
+    #[test]
+    fn set_field_block_inserts_new_list_as_block_yaml() {
+        let value = Value::List(vec![Value::String("kedi".into())]);
+        let (result, change) = set_field_block(MOVIE_FILE, "anlamlar", &value).unwrap();
+        // Block-style: a `key:` line followed by `- item` lines, NOT
+        // `anlamlar: '- kedi'` (the pre-fix quoted-scalar shape).
+        assert!(result.contains("anlamlar:\n- kedi"));
+        assert!(!result.contains("anlamlar: '- kedi'"));
+        // Inserted before closing `---`.
+        let closing_idx = result.rfind("\n---\n").unwrap();
+        assert!(result.find("anlamlar:").unwrap() < closing_idx);
+        match change {
+            ChangeDescription::SetField {
+                field, new_value, ..
+            } => {
+                assert_eq!(field, "anlamlar");
+                assert_eq!(new_value.trim_end(), "- kedi");
+            }
+            _ => panic!("expected SetField"),
+        }
+    }
+
+    #[test]
+    fn set_field_block_multi_item_list_round_trips() {
+        let value = Value::List(vec![
+            Value::String("猫が好きです。".into()),
+            Value::String("私の猫は黒いです。".into()),
+        ]);
+        let (result, _) = set_field_block(MOVIE_FILE, "ornekler_jp", &value).unwrap();
+        assert!(result.contains("ornekler_jp:\n- 猫が好きです。\n- 私の猫は黒いです。"));
+        // Parse the result back and confirm the field is a list, not a string.
+        let fm_end = result[4..].find("\n---\n").unwrap() + 4;
+        let fm = &result[4..fm_end];
+        let parsed: serde_yaml::Value = serde_yaml::from_str(fm).unwrap();
+        let items = parsed
+            .as_mapping()
+            .and_then(|m| m.get("ornekler_jp"))
+            .and_then(|v| v.as_sequence())
+            .expect("ornekler_jp must round-trip as a YAML sequence");
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn set_field_block_replaces_existing_block_list() {
+        // CHINESE_FILE has `kaliplar` as a block-style list of maps. Replace
+        // it with a fresh list and confirm the old span is gone.
+        let value = Value::List(vec![Value::String("replaced".into())]);
+        let (result, _) = set_field_block(CHINESE_FILE, "kaliplar", &value).unwrap();
+        assert!(result.contains("kaliplar:\n- replaced"));
+        assert!(!result.contains("快乐")); // old item gone
+        assert!(!result.contains("kuàilè")); // old nested key gone
+        // Adjacent fields preserved.
+        assert!(result.contains("hsk: 1"));
+        assert!(result.contains("ornekler:"));
+    }
+
+    #[test]
+    fn set_field_block_writes_map_as_nested_yaml() {
+        let mut m: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+        m.insert("k1".into(), Value::String("v1".into()));
+        m.insert("k2".into(), Value::Integer(2));
+        let value = Value::Map(m);
+        let (result, _) = set_field_block(MOVIE_FILE, "meta", &value).unwrap();
+        assert!(result.contains("meta:\n  k1: v1\n  k2: 2"));
+    }
+
+    #[test]
+    fn set_field_block_rejects_flow_style_existing() {
+        let content = "---\ntags: [a, b]\n---\nbody\n";
+        let value = Value::List(vec![Value::String("c".into())]);
+        let err = set_field_block(content, "tags", &value).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("flow-style"), "got: {}", msg);
+    }
+
+    #[test]
+    fn set_field_block_rejects_scalar_value() {
+        // Programmer error guard: scalars must go through set_field, not here.
+        let err =
+            set_field_block(MOVIE_FILE, "status", &Value::String("watched".into())).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("scalar value"), "got: {}", msg);
     }
 
     #[test]

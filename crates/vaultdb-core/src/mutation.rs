@@ -168,8 +168,20 @@ impl UpdateBuilder {
 
             let result: Result<()> = (|| {
                 for (field, value) in &self.set_fields {
-                    let value_str = render_value_for_yaml(value);
-                    let (new_content, change) = writer::set_field(&content, field, &value_str)?;
+                    // Scalars go through the single-line set_field path; lists
+                    // and maps go through set_field_block so the typed shape
+                    // is preserved as block-style YAML rather than flattened
+                    // into a quoted scalar. See `render_value_for_yaml` for
+                    // the pre-1.2.1 behaviour that this fixes.
+                    let (new_content, change) = match value {
+                        Value::List(_) | Value::Map(_) => {
+                            writer::set_field_block(&content, field, value)?
+                        }
+                        _ => {
+                            let value_str = render_value_for_yaml(value);
+                            writer::set_field(&content, field, &value_str)?
+                        }
+                    };
                     description_parts.push(format!("{}", change));
                     wr_changes.push(change);
                     content = new_content;
@@ -985,6 +997,68 @@ fn render_value_for_yaml(v: &Value) -> String {
 mod tests {
     use super::*;
     use crate::query::Predicate;
+
+    /// Regression test for the 1.1.0–1.2.0 typed-set bug: setting a
+    /// `Value::List` via `UpdateBuilder::set` used to flatten the value
+    /// through `render_value_for_yaml` and write it as a quoted scalar
+    /// (`anlamlar: '- kedi'`). After 1.2.1, lists and maps go through
+    /// `writer::set_field_block` and round-trip as proper block-style YAML.
+    #[test]
+    fn update_builder_writes_list_as_block_yaml() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/cat.md"),
+            "---\nanlam: kedi\n---\n\n# 猫\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("cat".into()),
+        });
+        let anlamlar = Value::List(vec![
+            Value::String("kedi".into()),
+            Value::String("pisi".into()),
+        ]);
+        let report = UpdateBuilder::new("notes", filter)
+            .set("anlamlar", anlamlar)
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(report.errors.len(), 0);
+        assert_eq!(report.changes.len(), 1);
+
+        let written = fs::read_to_string(dir.path().join("notes/cat.md")).unwrap();
+        // Block-style: a `key:` line followed by `- item` lines.
+        assert!(
+            written.contains("anlamlar:\n- kedi\n- pisi"),
+            "got:\n{}",
+            written
+        );
+        // The pre-fix corrupt shape must not appear.
+        assert!(!written.contains("anlamlar: '- kedi"), "got:\n{}", written);
+
+        // Re-read through Vault::query: the field must come back as a List,
+        // not a String. This is the assertion that catches a regression of
+        // the original bug end-to-end.
+        let records = vault
+            .load_records(&dir.path().join("notes"), false, false)
+            .unwrap()
+            .records;
+        let cat = &records[0];
+        match cat.fields.get("anlamlar") {
+            Some(Value::List(items)) => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(&items[0], Value::String(s) if s == "kedi"));
+                assert!(matches!(&items[1], Value::String(s) if s == "pisi"));
+            }
+            other => panic!("expected Value::List, got {:?}", other),
+        }
+    }
 
     #[test]
     fn update_builder_chains() {
