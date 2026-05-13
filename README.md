@@ -321,6 +321,11 @@ vaultdb schema validate 3-Notes
 vaultdb schema show 3-Notes
 ```
 
+When a `vaultdb-schema.yaml` exists at the vault root, `vaultdb create` will consult it for the target folder:
+
+- Applies per-field `default:` and `default_expr:` (`today`, `now`, `epoch`) for fields not set by `--template` / `--set`
+- Errors before writing if a required field is still missing
+
 ## Performance
 
 No caching, no indexing — reads files fresh on every command.
