@@ -26,6 +26,7 @@
 //! `Paper::tags()`), so filter construction is compile-checked. See the
 //! `vaultdb-orm-macros` crate for the supported `#[note(...)]` keys.
 
+pub mod create;
 pub mod error;
 pub mod field;
 pub mod note;
@@ -34,6 +35,7 @@ pub mod relation;
 pub mod update;
 pub mod value;
 
+pub use create::Create;
 pub use error::{OrmError, Result};
 pub use field::FieldRef;
 pub use note::{Note, record_to_json};
