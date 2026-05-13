@@ -56,6 +56,7 @@ pub mod lock;
 pub mod mutation;
 pub mod query;
 pub mod record;
+pub mod render;
 pub mod schema;
 pub mod vault;
 pub mod writer;
@@ -68,5 +69,6 @@ pub use mutation::{
 };
 pub use query::{CompareOp, Expr, LinkPredicate, Predicate, Query, SortKey};
 pub use record::{Record, Value};
+pub use render::{Format as ExportFormat, export_records, export_value, resolve_export_path};
 pub use vault::{LoadResult, QueryIter, Vault};
 pub use writer::WriteOptions;

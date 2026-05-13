@@ -34,6 +34,13 @@ clap = { version = "4", features = ["derive"] }
 # also pulls this in independently; centralising the version keeps the
 # two consumers locked together.
 url = "2"
+# CSV writer for the `render` module's CSV / TSV export. Used by both
+# vaultdb-core (the renderer) and the vaultdb CLI binary.
+csv = "1"
+# XLSX writer, gated behind vaultdb-core's `xlsx` feature. Both binaries
+# (vaultdb, vaultdb-mcp) enable that feature explicitly; wasm / pyo3
+# bindings opt out by default.
+rust_xlsxwriter = "0.93"
 
 [profile.release]
 lto = true

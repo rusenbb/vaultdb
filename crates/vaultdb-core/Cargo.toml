@@ -24,6 +24,20 @@ pest_derive = "2"
 # URL validation for `type: url` schema fields. Only `schema::validate_url`
 # imports this; no other code path uses it.
 url.workspace = true
+# CSV / TSV export in the `render` module. Always on — CSV is one of the
+# default export formats and its dep tree is tiny.
+csv.workspace = true
+# XLSX export, opt-in behind the `xlsx` feature. The dep is non-trivial
+# (ZIP + XML machinery), so wasm / pyo3 consumers who don't need
+# spreadsheet output don't pay for it.
+rust_xlsxwriter = { workspace = true, optional = true }
+
+[features]
+# Default features keep the renderer lightweight. `xlsx` is opt-in.
+default = []
+# Enables the `render::Format::Xlsx` variant and `rust_xlsxwriter`
+# integration. Required by the CLI and MCP binaries; bindings choose.
+xlsx = ["dep:rust_xlsxwriter"]
 
 [dev-dependencies]
 tempfile.workspace = true
