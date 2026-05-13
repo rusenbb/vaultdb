@@ -1,8 +1,7 @@
 # Releasing vaultdb to crates.io
 
-The standard path is now **automated via GitHub Actions** — push
-a `v*` tag, click "Approve" once in the Actions tab, and the
-publish workflow does the rest.
+The standard path is **automated via GitHub Actions** — push a
+`v*` tag, the publish workflow runs unattended.
 
 ## Automated path (recommended)
 
@@ -15,28 +14,27 @@ before tag time.
 Release-time, push a `v*` tag and
 `.github/workflows/publish.yml` takes over:
 
-1. Pause on the `production` GitHub Environment for manual
-   approval — protects against accidental tag pushes.
-2. Publish `vaultdb-core` to crates.io.
-3. Wait 60 seconds for the sparse index to settle.
-4. Publish `vaultdb-mcp` and `vaultdb` (CLI) in parallel.
-5. Open a draft GitHub Release with auto-generated notes.
+1. Publish `vaultdb-core` to crates.io.
+2. Wait 60 seconds for the sparse index to settle.
+3. Publish `vaultdb-mcp` and `vaultdb` (CLI) in parallel.
+4. Open a draft GitHub Release with auto-generated notes.
 
 ```bash
-# Tag, push, click Approve in the Actions tab.
-git tag -a v1.0.1 -m "vaultdb v1.0.1"
-git push origin v1.0.1
+# Bump the workspace version in Cargo.toml first, then:
+git tag -a v1.1.1 -m "vaultdb v1.1.1"
+git push origin v1.1.1
 ```
+
+Tagging IS the approval. **Don't push tags from branches you
+don't intend to release** — the workflow doesn't pause for human
+review before publishing. If you tag the wrong commit, your only
+recourse is `cargo yank` after the fact (which marks a version as
+undesirable but doesn't reclaim the version number).
 
 GitHub secrets needed (one-time setup):
 - `CARGO_REGISTRY_TOKEN` — from
   <https://crates.io/me/account/tokens>. Scope it to "publish new
   versions of crates I own."
-
-GitHub Environment needed (one-time setup):
-- `production`, with required reviewers set to your account.
-  Settings → Environments → New environment → "production" →
-  Required reviewers → add yourself.
 
 ## Manual path (fallback)
 

@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 # Path + version: local dev links via `path`, crates.io resolves via
 # `version`. Required for publishing the CLI alongside the library.
-vaultdb-core = { path = "../vaultdb-core", version = "1.1.0" }
+vaultdb-core = { path = "../vaultdb-core", version = "1.1.1" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

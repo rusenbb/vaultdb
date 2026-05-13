@@ -433,10 +433,21 @@ fn unescape(s: &str) -> String {
 
 /// Best-effort numeric coercion of a string-typed value, used for ops
 /// that compare on a common numeric scale (`=`, `contains`, etc.).
-/// String values that parse as i64 → `Value::Integer`; else as f64 →
-/// `Value::Float`; else kept as `Value::String`.
+/// String values that match the YAML bool literals (`true` / `false`,
+/// case-sensitive) → `Value::Bool`; else parse as i64 → `Value::Integer`;
+/// else as f64 → `Value::Float`; else kept as `Value::String`.
+///
+/// Bool comes first so a record with a real YAML `published: true`
+/// matches `where published = true` from the DSL instead of comparing a
+/// `Value::Bool(true)` against a `Value::String("true")` (different
+/// enum variants, would never equal).
 fn coerce_for_equals(v: Value) -> Value {
     if let Value::String(ref s) = v {
+        match s.as_str() {
+            "true" => return Value::Bool(true),
+            "false" => return Value::Bool(false),
+            _ => {}
+        }
         if let Ok(i) = s.parse::<i64>() {
             return Value::Integer(i);
         }
@@ -745,6 +756,44 @@ mod tests {
                 assert_eq!(parts.len(), 2);
             }
             other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    // ── bool literal coercion (1.1.1) ─────────────────────────────────
+
+    #[test]
+    fn equals_true_coerces_to_bool() {
+        let e = parse_ok("published = true");
+        match e {
+            Expr::Predicate(Predicate::Equals { value, .. }) => {
+                assert_eq!(value, Value::Bool(true));
+            }
+            other => panic!("expected Equals(Bool(true)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn equals_false_coerces_to_bool() {
+        let e = parse_ok("published = false");
+        match e {
+            Expr::Predicate(Predicate::Equals { value, .. }) => {
+                assert_eq!(value, Value::Bool(false));
+            }
+            other => panic!("expected Equals(Bool(false)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mixed_case_stays_string() {
+        // YAML bool literals are lowercase. Don't surprise-coerce
+        // "True" or "TRUE" — keep them as strings so a literal user
+        // typing them gets a string match.
+        let e = parse_ok("flag = True");
+        match e {
+            Expr::Predicate(Predicate::Equals { value, .. }) => {
+                assert_eq!(value, Value::String("True".into()));
+            }
+            other => panic!("expected Equals(String), got {:?}", other),
         }
     }
 }

@@ -399,11 +399,17 @@ impl Value {
     }
 
     /// Best-effort parse of a CLI-style `FIELD=VALUE` scalar string into a
-    /// typed `Value`. Tries integer, then float, then falls back to a
-    /// string. Shared by every frontend that accepts loosely-typed user
-    /// input — CLI `--set`, MCP `plan_update`, the upcoming
-    /// `CreateBuilder` set-field path.
+    /// typed `Value`. Tries bool literal (`true` / `false` exact match —
+    /// case-sensitive to match YAML), then integer, then float, then falls
+    /// back to a string. Shared by every frontend that accepts
+    /// loosely-typed user input — CLI `--set`, MCP `plan_update`'s legacy
+    /// string-set path, and `CreateBuilder` set-field via the CLI.
     pub fn parse_scalar(s: &str) -> Self {
+        match s {
+            "true" => return Value::Bool(true),
+            "false" => return Value::Bool(false),
+            _ => {}
+        }
         if let Ok(i) = s.parse::<i64>() {
             return Value::Integer(i);
         }
@@ -604,5 +610,29 @@ mod tests {
             v,
             Value::List(vec![Value::Integer(1), Value::String("x".into())])
         );
+    }
+
+    // ── parse_scalar coverage ─────────────────────────────────────────
+
+    #[test]
+    fn parse_scalar_bool_literals() {
+        assert_eq!(Value::parse_scalar("true"), Value::Bool(true));
+        assert_eq!(Value::parse_scalar("false"), Value::Bool(false));
+    }
+
+    #[test]
+    fn parse_scalar_case_sensitive_for_bool() {
+        // YAML's bool literals are lowercase only; mixed-case stays string
+        // so that values like "True" or "FALSE" don't accidentally get
+        // coerced to bool.
+        assert_eq!(Value::parse_scalar("True"), Value::String("True".into()));
+        assert_eq!(Value::parse_scalar("FALSE"), Value::String("FALSE".into()));
+    }
+
+    #[test]
+    fn parse_scalar_integer_then_float_then_string() {
+        assert_eq!(Value::parse_scalar("42"), Value::Integer(42));
+        assert_eq!(Value::parse_scalar("3.5"), Value::Float(3.5));
+        assert_eq!(Value::parse_scalar("hi"), Value::String("hi".into()));
     }
 }

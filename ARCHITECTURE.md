@@ -77,7 +77,7 @@ The following are part of the public contract:
 - `Record` and `Value` (with `Serialize`/`Deserialize`)
 - `Expr`, `Predicate`, `LinkPredicate`, `CompareOp`, `Query`, `SortKey`
 - `LinkGraph`, `Direction`, `GraphScope`, `UnresolvedLink`
-- `UpdateBuilder`, `DeleteBuilder`, `MoveBuilder`, `RenameBuilder` and
+- `CreateBuilder`, `UpdateBuilder`, `DeleteBuilder`, `MoveBuilder`, `RenameBuilder` and
   their `MutationReport` / `PlannedChange` / `MutationError` types
 - `LoadResult`, `ParseError`
 - `VaultdbError` (the variants are part of the contract; only

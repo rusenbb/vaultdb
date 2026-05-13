@@ -420,9 +420,24 @@ Wire it into Claude Desktop's config (`~/.config/claude/claude_desktop_config.js
 }
 ```
 
-Tools exposed: `query`, `find_by_name`, `list_folders`, `links`, `traverse`, `unresolved`, `schema_show`, `schema_infer`, plus four **plan-only** mutation tools (`plan_update`, `plan_delete`, `plan_move`, `plan_rename`) that show what a change would do without writing — agents propose, you (or the host) decide whether to apply.
+Tools exposed:
 
-There are intentionally no `execute_*` tools. Mutations go through the CLI or your own application code, with you in the loop.
+**Read** — `query`, `find_by_name`, `list_folders`, `links`, `traverse`, `unresolved`.
+
+**Schema** — `schema_show`, `schema_infer`.
+
+**Plan-only mutation** (preview, never writes) — `plan_create`, `plan_update`, `plan_delete`, `plan_move`, `plan_rename`. Default flow: agents propose, you approve, hosts execute.
+
+**Execute** — `execute_create`, `execute_update`, `execute_move`, `execute_rename`, `execute_delete`. **Disabled by default.** Enable per-capability via launch flags:
+
+```
+--dangerously-allow-create
+--dangerously-allow-update       (covers update + move + rename)
+--dangerously-allow-delete       (soft-delete to .trash/)
+--dangerously-allow-permanent-delete   (required in addition to -delete)
+```
+
+Every successful execute call appends a line to `<vault>/.vaultdb/audit.log` with the timestamp, tool name, params, and change count. The default mode (no flags) preserves the "propose, approve, execute via a separate path" pattern; opt-in flags shift execution to the agent for sessions where that's the desired ergonomics.
 
 ## Claude Code integration
 

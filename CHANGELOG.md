@@ -5,6 +5,177 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.1] — Boolean literal support in CLI / DSL string paths
+
+### Fixed
+
+- `Value::parse_scalar` (record.rs) and `coerce_for_equals` (dsl.rs) now
+  recognise the YAML bool literals `true` and `false` (case-sensitive)
+  and produce `Value::Bool`. Previously both fell through to
+  `Value::String("true")` / `Value::String("false")`, so:
+  - `vaultdb update --set published=true` wrote a string instead of a
+    YAML bool into frontmatter.
+  - `vaultdb query --where "published = true"` compared
+    `Value::String("true")` against the stored `Value::Bool(true)` —
+    different enum variants, no match, empty result.
+  - MCP `plan_update`'s legacy `set: ["field=true"]` form had the same
+    issue.
+
+  After 1.1.1, bool fields filter and round-trip correctly through
+  every string-based interface. The typed JSON paths (MCP
+  `plan_create` / `plan_update`'s `set_typed`, ORM `Create::<T>::set`)
+  already handled bools correctly — this fix brings the string
+  interfaces to parity.
+
+- Case-sensitivity: only lowercase `true` / `false` coerce. Mixed-case
+  (`True`, `FALSE`) stays a `Value::String`. Matches YAML's behaviour
+  and avoids surprising consumers who actually want the string.
+
+### Documentation
+
+- README.md MCP section now lists `plan_create` and the five
+  `execute_*` tools plus the four `--dangerously-allow-*` launch
+  flags. The previous "intentionally no execute_* tools" claim was
+  the 1.0 design and contradicted 1.1.0.
+- ARCHITECTURE.md public API list adds `CreateBuilder`.
+- RELEASE.md drops the `production` GitHub Environment approval
+  step — that gate was removed from `publish.yml` in 1.1.0.
+- vaultdb-orm/README.md examples use `discriminator` / `collection`
+  attributes and demonstrate `Create<T>`. The legacy `filter` form
+  still works and is mentioned as a backward-compatibility alias.
+
+## [1.1.0] — Schema-aware create, MCP execute tools, ORM Create
+
+The headline: vaultdb-core owns one create path that the CLI, MCP, and
+ORM all share. Schemas in `vaultdb-schema.yaml` are now consulted at
+create time, with defaults auto-filled and required fields enforced
+before writing.
+
+### Added — three new schema field types
+
+- `wikilink` — string matching `[[name]]`, `[[name|alias]]`,
+  `[[name#section]]`, `[[name#section|alias]]`. Shape validation only;
+  target-existence checks are not in v1.
+- `date` — string in `YYYY-MM-DD` with valid month/day ranges. Reuses
+  the hand-rolled date arithmetic in `record::epoch_days_to_date`; no
+  new date dependency.
+- `url` — string parseable as an absolute URL via the `url` crate.
+- New public helpers: `schema::is_valid_wikilink`, `is_valid_date`,
+  `is_valid_url`.
+
+### Added — schema defaults
+
+- `FieldSchema::default: Option<Value>` — literal default applied at
+  create time, validated against `field_type` and `enum_values` at
+  schema load.
+- `FieldSchema::default_expr: Option<String>` — dynamic default.
+  Closed enum: `today` / `now` / `epoch`. Mutually exclusive with
+  `default`.
+- `schema::resolve_default_expr` resolves the keywords to `Value` at
+  use time, via new `record::today_string` / `now_string` /
+  `epoch_seconds` helpers.
+- `load_schema` now calls `schema::validate_schema_defaults` after
+  parsing, so bad defaults fail loudly with a `SchemaError` naming the
+  collection and field.
+
+### Added — CreateBuilder
+
+- New `vaultdb_core::CreateBuilder` — fifth mutation builder, matching
+  the `plan` / `execute` split of the existing four. Holds the
+  vault-scoped lock during writes; writes are atomic via
+  tempfile+rename.
+- Composition order: template frontmatter → `--set` → schema defaults.
+  Required-field check happens AFTER defaults, so missing required
+  fields surface as `MutationError`s and the file is NOT written.
+- `plan_with_content` returns both the report and the file content
+  that would be written, so the CLI's `--dry-run` can show the
+  resolved frontmatter.
+- The CLI's `vaultdb create` is now schema-aware: when
+  `<vault>/vaultdb-schema.yaml` exists with a collection matching the
+  target folder, defaults auto-fill and required is enforced.
+
+### Added — MCP `plan_create` + `execute_*` (flag-gated)
+
+- `plan_create` MCP tool: schema-aware preview. Typed JSON `set` (no
+  legacy `field=value` strings).
+- `execute_create`, `execute_update`, `execute_delete`, `execute_move`,
+  `execute_rename` MCP tools. **Disabled by default.** Enabled via
+  launch flags:
+  - `--dangerously-allow-create`
+  - `--dangerously-allow-update` (covers update + move + rename)
+  - `--dangerously-allow-delete` (soft-delete to `.trash/`)
+  - `--dangerously-allow-permanent-delete` (required in addition to
+    `--dangerously-allow-delete` for `permanent: true`)
+- Every successful execute appends a line to
+  `<vault>/.vaultdb/audit.log` (best-effort; doesn't block mutation).
+- `plan_update` gained `set_typed: {field: value}` alongside the
+  legacy `set: ["field=value"]` for forward compatibility with
+  `plan_create`'s shape.
+
+### Added — ORM `Create<T>`
+
+- `vaultdb_orm::Create<T>` — typed wrapper around `CreateBuilder`,
+  mirroring the existing `Update<T>`. Folder comes from `T::FOLDER`;
+  typed `FieldRef` accessors give compile-checked sets.
+- `Create::<T>::new` auto-resolves the matching `CollectionSchema`
+  from `<vault>/vaultdb-schema.yaml` when `T::collection()` is `Some`
+  — no explicit `.with_schema(...)` call needed.
+
+### Added — `Note` trait + macro attributes
+
+- New `Note::collection() -> Option<&'static str>` — names the YAML
+  collection to bind to. Default `None`.
+- New `Note::field_names() -> &'static [&'static str]` — the model's
+  frontmatter field list (minus relations / virtual-mapped fields).
+  Foundation for schema consistency tooling.
+- `#[note(...)]` macro gained:
+  - `discriminator = "..."` — preferred name for what was `filter`.
+    Folder defaults to `""` (anywhere under vault root) when only a
+    discriminator is given.
+  - `collection = "..."` — name of the matching YAML collection.
+- The legacy `filter` attribute still works as an alias for
+  `discriminator`; no deprecation warning yet.
+
+### Added — `schema init` writes the file
+
+- `vaultdb schema init <folder> --write` merges the inferred
+  collection into `<vault>/vaultdb-schema.yaml` (existing collections
+  at the same folder are replaced; others preserved). Without
+  `--write`, prints to stdout as before.
+- MCP's `schema_infer` gained a matching `write: bool` parameter.
+
+### Changed — internal cleanups (no behaviour change)
+
+- `SCHEMA_FILENAME` constant and `schema_path()` helper hoisted to
+  `vaultdb-core`; CLI and MCP no longer carry private copies.
+- `Value::parse_scalar(&str)` hoisted to `vaultdb-core::record`;
+  duplicate `parse_set_value` in CLI and MCP removed.
+- `VaultSchema::collections_for_folder` and new
+  `collection_for_folder` (exact match) replace the duplicated
+  free function.
+- `CollectionSchema`, `FieldSchema`, `VaultSchema` derive `Clone`;
+  the hand-rolled `clone_collection` in MCP is gone.
+- Removed dead `FieldSchema::required: Option<bool>` (collection-level
+  `required: Vec<String>` is the sole source of truth).
+- `[workspace.dependencies]` centralises `serde`, `serde_json`,
+  `serde_yaml`, `anyhow`, `thiserror`, `tempfile`, `tracing`, `clap`,
+  `url`.
+- `UpdateBuilder::compute` now surfaces a missing `raw_content` as
+  `VaultdbError::Internal` (was a per-record `MutationError` — but
+  it's an invariant violation, not a soft error).
+
+### Fixed — clippy 1.95 `collapsible_match`
+
+- Restructured `validate_record`'s format-check block to use match
+  arms with guards. CI was red on every push since the rust-toolchain
+  pin picked up clippy 1.95.
+
+### CI
+
+- Removed the `production` GitHub Environment approval step from
+  `publish.yml`. Tagging IS the approval — don't push tags from
+  branches you don't intend to release.
+
 ## [0.4.0] — Query layer evolution
 
 Phase B of the SQLite-of-markdown roadmap: a real DSL parser, a

@@ -1789,7 +1789,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vaultdb"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "vaultdb-core"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "fs2",
  "pest",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "vaultdb-fts"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -1835,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "vaultdb-mcp"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1853,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "vaultdb-orm"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1866,7 +1866,7 @@ dependencies = [
 
 [[package]]
 name = "vaultdb-orm-macros"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1875,7 +1875,7 @@ dependencies = [
 
 [[package]]
 name = "vaultdb-pyo3"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "pyo3",
  "serde",
@@ -1885,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "vaultdb-wasm"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "js-sys",
  "serde",
