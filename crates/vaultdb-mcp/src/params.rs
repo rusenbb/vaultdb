@@ -165,3 +165,27 @@ pub struct PlanRenameParams {
     pub from: String,
     pub to: String,
 }
+
+/// Parameters for the `plan_create` tool.
+///
+/// Unlike `plan_update`'s string-based `set: Vec<String>` (a legacy of
+/// the CLI's flat `--set field=value` interface), `plan_create` accepts a
+/// typed JSON object for `set` — values flow through as `Value::String`,
+/// `Value::Integer`, etc., which is what an MCP client would propose
+/// naturally and matches the typed Rust API in `CreateBuilder`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct PlanCreateParams {
+    /// Target folder, relative to the vault root.
+    pub folder: String,
+    /// Note name (becomes `<name>.md` under `folder`).
+    pub name: String,
+    /// Optional template file path, relative to the vault root.
+    #[serde(default)]
+    pub template: Option<String>,
+    /// Frontmatter overrides keyed by field name. JSON values map to
+    /// vaultdb's `Value` directly — strings stay strings, numbers
+    /// become integer/float, booleans stay booleans, arrays become
+    /// lists, objects become maps.
+    #[serde(default)]
+    pub set: std::collections::BTreeMap<String, serde_json::Value>,
+}

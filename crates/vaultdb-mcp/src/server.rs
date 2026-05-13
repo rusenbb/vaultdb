@@ -18,9 +18,9 @@ use serde::Serialize;
 use vaultdb_core::vault::Vault;
 
 use crate::params::{
-    FindByNameParams, LinksParams, ListFoldersParams, PlanDeleteParams, PlanMoveParams,
-    PlanRenameParams, PlanUpdateParams, QueryParams, SchemaInferParams, SchemaShowParams,
-    TraverseParams, UnresolvedParams,
+    FindByNameParams, LinksParams, ListFoldersParams, PlanCreateParams, PlanDeleteParams,
+    PlanMoveParams, PlanRenameParams, PlanUpdateParams, QueryParams, SchemaInferParams,
+    SchemaShowParams, TraverseParams, UnresolvedParams,
 };
 use crate::tools;
 
@@ -162,5 +162,12 @@ impl VaultdbServer {
     )]
     fn plan_rename(&self, params: Parameters<PlanRenameParams>) -> Result<String, ErrorData> {
         json_string(tools::mutations::plan_rename(self.vault()?, params.0)?)
+    }
+
+    #[tool(
+        description = "Plan-only create. Shows the file that would be written to <folder>/<name>.md including schema-defaulted fields and required-field checks. Does NOT write. `set` is a typed JSON object: {\"director\":\"...\", \"year\":2021}."
+    )]
+    fn plan_create(&self, params: Parameters<PlanCreateParams>) -> Result<String, ErrorData> {
+        json_string(tools::mutations::plan_create(self.vault()?, params.0)?)
     }
 }
