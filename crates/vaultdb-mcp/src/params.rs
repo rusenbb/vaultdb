@@ -8,6 +8,28 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+/// Common export side-effect for read tools. When `export` is set, the
+/// tool serializes its result to a file under the vault root (in
+/// addition to returning it in-band). Inferred format from the
+/// extension matches the CLI: `.csv`, `.tsv`, `.json`, `.yaml`/`.yml`,
+/// `.xlsx`.
+///
+/// Embedded into every read tool's param struct via `#[serde(flatten)]`
+/// so the wire schema looks flat to MCP clients.
+#[derive(Debug, Default, Clone, Deserialize, JsonSchema)]
+pub struct ExportOptions {
+    /// Optional vault-relative path to also save the result to. Absolute
+    /// paths and `..` escapes are rejected; `.md` is reserved for vault
+    /// notes. On filename collision the file is auto-suffixed `(1)`,
+    /// `(2)`, ... — there is no overwrite mode.
+    #[serde(default)]
+    pub export: Option<String>,
+    /// CSV / TSV delimiter when exporting to `.csv` or `.tsv`. One of
+    /// `comma` (default), `semicolon`, `tab`. Ignored for other formats.
+    #[serde(default)]
+    pub csv_delimiter: Option<String>,
+}
+
 // ── Read tools ─────────────────────────────────────────────────────────────
 
 /// Parameters for the `query` tool.
@@ -34,6 +56,8 @@ pub struct QueryParams {
     /// Walk subfolders recursively (default false).
     #[serde(default)]
     pub recursive: bool,
+    #[serde(flatten)]
+    pub export_opts: ExportOptions,
 }
 
 /// Parameters for the `find_by_name` tool.
@@ -43,12 +67,17 @@ pub struct FindByNameParams {
     pub folder: String,
     /// Filename without the `.md` extension.
     pub name: String,
+    #[serde(flatten)]
+    pub export_opts: ExportOptions,
 }
 
 /// Parameters for the `list_folders` tool. Empty for now — the server
 /// always lists folders rooted at the vault root.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct ListFoldersParams {}
+pub struct ListFoldersParams {
+    #[serde(flatten)]
+    pub export_opts: ExportOptions,
+}
 
 // ── Link / graph tools ─────────────────────────────────────────────────────
 
@@ -60,6 +89,8 @@ pub struct LinksParams {
     /// Direction: `outgoing`, `incoming`, or `both`. Default `both`.
     #[serde(default = "default_both")]
     pub direction: String,
+    #[serde(flatten)]
+    pub export_opts: ExportOptions,
 }
 
 fn default_both() -> String {
@@ -77,6 +108,8 @@ pub struct TraverseParams {
     /// Direction: `outgoing`, `incoming`, or `both`. Default `outgoing`.
     #[serde(default = "default_outgoing")]
     pub direction: String,
+    #[serde(flatten)]
+    pub export_opts: ExportOptions,
 }
 
 fn default_traverse_depth() -> usize {
@@ -89,7 +122,10 @@ fn default_outgoing() -> String {
 
 /// Parameters for the `unresolved` tool.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct UnresolvedParams {}
+pub struct UnresolvedParams {
+    #[serde(flatten)]
+    pub export_opts: ExportOptions,
+}
 
 // ── Schema tools ───────────────────────────────────────────────────────────
 
@@ -100,6 +136,8 @@ pub struct SchemaShowParams {
     /// returned; otherwise the full schema is returned.
     #[serde(default)]
     pub folder: Option<String>,
+    #[serde(flatten)]
+    pub export_opts: ExportOptions,
 }
 
 /// Parameters for the `schema_infer` tool.
@@ -116,6 +154,8 @@ pub struct SchemaInferParams {
     /// for review only.
     #[serde(default)]
     pub write: bool,
+    #[serde(flatten)]
+    pub export_opts: ExportOptions,
 }
 
 // ── Plan-only mutation tools ───────────────────────────────────────────────

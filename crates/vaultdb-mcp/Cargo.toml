@@ -18,8 +18,9 @@ path = "src/main.rs"
 #   - local development stays linked to the in-tree source via `path`
 #   - `cargo publish` resolves the dependency by version on crates.io
 # Required by crates.io: every dependency of a published crate must
-# declare a version requirement.
-vaultdb-core = { path = "../vaultdb-core", version = "1.1.1" }
+# declare a version requirement. The `xlsx` feature is enabled so
+# `export: "foo.xlsx"` works for any read tool.
+vaultdb-core = { path = "../vaultdb-core", version = "1.1.1", features = ["xlsx"] }
 rmcp = { version = "1.6", features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
 serde.workspace = true

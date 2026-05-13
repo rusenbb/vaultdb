@@ -12,15 +12,24 @@
 //! and break the library scope discipline rule (spec §7). MCP clients
 //! see a single text content block whose body is JSON; LLMs handle this
 //! fine and the wire shape stays stable.
+//!
+//! When a read tool's `export` parameter is set, the response shape
+//! changes from `<result>` to `{ "data": <result>, "exported_to": "<path>" }`.
+//! That wrapper only appears when export was requested; the in-band
+//! shape for plain reads is unchanged.
+
+use std::path::Path;
 
 use rmcp::{ErrorData, handler::server::wrapper::Parameters, tool, tool_router};
 use serde::Serialize;
+use vaultdb_core::record::Record;
+use vaultdb_core::render;
 use vaultdb_core::vault::Vault;
 
 use crate::params::{
-    FindByNameParams, LinksParams, ListFoldersParams, PlanCreateParams, PlanDeleteParams,
-    PlanMoveParams, PlanRenameParams, PlanUpdateParams, QueryParams, SchemaInferParams,
-    SchemaShowParams, TraverseParams, UnresolvedParams,
+    ExportOptions, FindByNameParams, LinksParams, ListFoldersParams, PlanCreateParams,
+    PlanDeleteParams, PlanMoveParams, PlanRenameParams, PlanUpdateParams, QueryParams,
+    SchemaInferParams, SchemaShowParams, TraverseParams, UnresolvedParams,
 };
 use crate::tools;
 
@@ -94,6 +103,83 @@ fn json_string<T: Serialize>(value: T) -> Result<String, ErrorData> {
         .map_err(|e| ErrorData::internal_error(format!("serialize failed: {}", e), None))
 }
 
+/// Resolve the CSV delimiter byte from the optional MCP param. Accepts
+/// both named values (`comma`/`semicolon`/`tab`) and literal characters
+/// (`,`/`;`/`\t`). Defaults to comma.
+fn parse_csv_delimiter(s: Option<&str>) -> Result<u8, ErrorData> {
+    match s {
+        None | Some("comma") | Some(",") => Ok(b','),
+        Some("semicolon") | Some(";") => Ok(b';'),
+        Some("tab") | Some("\t") | Some("\\t") => Ok(b'\t'),
+        Some(other) => Err(ErrorData::invalid_params(
+            format!(
+                "csv_delimiter must be one of 'comma', 'semicolon', 'tab'; got '{}'",
+                other
+            ),
+            None,
+        )),
+    }
+}
+
+/// Build the export-aware response for a record-shaped tool result. If
+/// `export` is None, returns the records as JSON (existing shape).
+/// Otherwise also writes the file via `render::export_records` and
+/// wraps the response with `{ data, exported_to }`.
+fn respond_records(
+    vault: &Vault,
+    records: &[Record],
+    select: Option<&[String]>,
+    link_index: Option<&vaultdb_core::links::LinkGraph>,
+    export_opts: &ExportOptions,
+) -> Result<String, ErrorData> {
+    let body = serde_json::to_value(records)
+        .map_err(|e| ErrorData::internal_error(format!("serialize records: {}", e), None))?;
+    if let Some(path_str) = &export_opts.export {
+        let delim = parse_csv_delimiter(export_opts.csv_delimiter.as_deref())?;
+        let path = Path::new(path_str);
+        let fmt = render::Format::from_path(path)
+            .map_err(|e| ErrorData::invalid_params(format!("export format: {}", e), None))?
+            .with_csv_delimiter(delim);
+        let written =
+            render::export_records(&vault.root, path, fmt, records, select, link_index)
+                .map_err(|e| ErrorData::invalid_params(format!("export failed: {}", e), None))?;
+        json_string(serde_json::json!({
+            "data": body,
+            "exported_to": written.display().to_string(),
+        }))
+    } else {
+        json_string(body)
+    }
+}
+
+/// Build the export-aware response for an arbitrary-shaped tool result.
+/// JSON / YAML always work; CSV / XLSX only work for tabular shapes
+/// (array of objects, array of scalars, single object) and return a
+/// typed error otherwise.
+fn respond_value<T: Serialize>(
+    vault: &Vault,
+    value: &T,
+    export_opts: &ExportOptions,
+) -> Result<String, ErrorData> {
+    let body = serde_json::to_value(value)
+        .map_err(|e| ErrorData::internal_error(format!("serialize value: {}", e), None))?;
+    if let Some(path_str) = &export_opts.export {
+        let delim = parse_csv_delimiter(export_opts.csv_delimiter.as_deref())?;
+        let path = Path::new(path_str);
+        let fmt = render::Format::from_path(path)
+            .map_err(|e| ErrorData::invalid_params(format!("export format: {}", e), None))?
+            .with_csv_delimiter(delim);
+        let written = render::export_value(&vault.root, path, fmt, &body)
+            .map_err(|e| ErrorData::invalid_params(format!("export failed: {}", e), None))?;
+        json_string(serde_json::json!({
+            "data": body,
+            "exported_to": written.display().to_string(),
+        }))
+    } else {
+        json_string(body)
+    }
+}
+
 #[tool_router(server_handler)]
 impl VaultdbServer {
     // ── Liveness ───────────────────────────────────────────────────────────
@@ -106,63 +192,97 @@ impl VaultdbServer {
     // ── Read tools ─────────────────────────────────────────────────────────
 
     #[tool(
-        description = "Run a structured query against a folder. Filter with the where-DSL (e.g. \"status = active\", \"tags contains topic/ai\"). Returns matching records as JSON, minus their raw body content."
+        description = "Run a structured query against a folder. Filter with the where-DSL (e.g. \"status = active\", \"tags contains topic/ai\"). Returns matching records as JSON, minus their raw body content. Pass `export: \"path/foo.csv\"` (vault-relative, .csv/.tsv/.json/.yaml/.xlsx) to also write the results to a file under the vault."
     )]
     fn query(&self, params: Parameters<QueryParams>) -> Result<String, ErrorData> {
-        json_string(tools::query::query(self.vault()?, params.0)?)
+        let vault = self.vault()?;
+        let export_opts = params.0.export_opts.clone();
+        let select_fields: Option<Vec<String>> = params
+            .0
+            .select
+            .as_deref()
+            .map(|s| s.split(',').map(|f| f.trim().to_string()).collect());
+        let records = tools::query::query(vault, params.0)?;
+        let select_ref: Option<&[String]> = select_fields.as_deref();
+        // The MCP `query` returns records already stripped of raw_content,
+        // so no link index is needed for export — virtual fields like
+        // `_name` / `_path` work from the record's path alone.
+        respond_records(vault, &records, select_ref, None, &export_opts)
     }
 
     #[tool(
-        description = "Look up a single record by filename (without .md). Returns JSON null when the record doesn't exist."
+        description = "Look up a single record by filename (without .md). Returns JSON null when the record doesn't exist. Supports `export` like `query`."
     )]
     fn find_by_name(&self, params: Parameters<FindByNameParams>) -> Result<String, ErrorData> {
-        json_string(tools::query::find_by_name(self.vault()?, params.0)?)
+        let vault = self.vault()?;
+        let export_opts = params.0.export_opts.clone();
+        let opt = tools::query::find_by_name(vault, params.0)?;
+        let records: Vec<Record> = opt.into_iter().collect();
+        respond_records(vault, &records, None, None, &export_opts)
     }
 
     #[tool(
-        description = "List the top-level folders in the vault that contain at least one .md file. Useful for discovering what folders are queryable."
+        description = "List the top-level folders in the vault that contain at least one .md file. Useful for discovering what folders are queryable. Supports `export`."
     )]
     fn list_folders(&self, params: Parameters<ListFoldersParams>) -> Result<String, ErrorData> {
-        json_string(tools::query::list_folders(self.vault()?, params.0)?)
+        let vault = self.vault()?;
+        let export_opts = params.0.export_opts.clone();
+        let folders = tools::query::list_folders(vault, params.0)?;
+        respond_value(vault, &folders, &export_opts)
     }
 
     // ── Graph tools ────────────────────────────────────────────────────────
 
     #[tool(
-        description = "Show outgoing and incoming wikilinks for a single note. Direction is one of 'outgoing', 'incoming', 'both'."
+        description = "Show outgoing and incoming wikilinks for a single note. Direction is one of 'outgoing', 'incoming', 'both'. Supports `export`."
     )]
     fn links(&self, params: Parameters<LinksParams>) -> Result<String, ErrorData> {
-        json_string(tools::links::links(self.vault()?, params.0)?)
+        let vault = self.vault()?;
+        let export_opts = params.0.export_opts.clone();
+        let output = tools::links::links(vault, params.0)?;
+        respond_value(vault, &output, &export_opts)
     }
 
     #[tool(
-        description = "BFS traversal from a starting note up to a given depth. Returns each reached note paired with the depth it was found at."
+        description = "BFS traversal from a starting note up to a given depth. Returns each reached note paired with the depth it was found at. Supports `export`."
     )]
     fn traverse(&self, params: Parameters<TraverseParams>) -> Result<String, ErrorData> {
-        json_string(tools::links::traverse(self.vault()?, params.0)?)
+        let vault = self.vault()?;
+        let export_opts = params.0.export_opts.clone();
+        let hits = tools::links::traverse(vault, params.0)?;
+        respond_value(vault, &hits, &export_opts)
     }
 
     #[tool(
-        description = "List all wikilinks across the vault that point at notes which don't exist."
+        description = "List all wikilinks across the vault that point at notes which don't exist. Supports `export`."
     )]
     fn unresolved(&self, params: Parameters<UnresolvedParams>) -> Result<String, ErrorData> {
-        json_string(tools::links::unresolved(self.vault()?, params.0)?)
+        let vault = self.vault()?;
+        let export_opts = params.0.export_opts.clone();
+        let unresolved = tools::links::unresolved(vault, params.0)?;
+        respond_value(vault, &unresolved, &export_opts)
     }
 
     // ── Schema tools ───────────────────────────────────────────────────────
 
     #[tool(
-        description = "Show the persisted schema (vaultdb-schema.yaml). Optionally filter to one folder."
+        description = "Show the persisted schema (vaultdb-schema.yaml). Optionally filter to one folder. Supports `export` (use .json or .yaml — schema shape isn't tabular)."
     )]
     fn schema_show(&self, params: Parameters<SchemaShowParams>) -> Result<String, ErrorData> {
-        json_string(tools::schema::schema_show(self.vault()?, params.0)?)
+        let vault = self.vault()?;
+        let export_opts = params.0.export_opts.clone();
+        let output = tools::schema::schema_show(vault, params.0)?;
+        respond_value(vault, &output, &export_opts)
     }
 
     #[tool(
-        description = "Infer a schema from existing records in a folder. Returns the structured schema and a YAML rendering for human review."
+        description = "Infer a schema from existing records in a folder. Returns the structured schema and a YAML rendering for human review. Supports `export` (json/yaml)."
     )]
     fn schema_infer(&self, params: Parameters<SchemaInferParams>) -> Result<String, ErrorData> {
-        json_string(tools::schema::schema_infer(self.vault()?, params.0)?)
+        let vault = self.vault()?;
+        let export_opts = params.0.export_opts.clone();
+        let output = tools::schema::schema_infer(vault, params.0)?;
+        respond_value(vault, &output, &export_opts)
     }
 
     // ── Plan-only mutation tools ───────────────────────────────────────────

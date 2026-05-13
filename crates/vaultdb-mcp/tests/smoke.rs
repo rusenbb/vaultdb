@@ -189,6 +189,111 @@ fn links_returns_outgoing_targets() {
 }
 
 #[test]
+fn query_export_csv_writes_file_and_wraps_response() {
+    let vault = fixture_vault();
+    let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query","arguments":{"folder":"notes","export":"exports/out.csv"}}}"#;
+    let lines = run_session(vault.path(), &[req]);
+    let resp = pick_response(&lines, 2);
+    let body = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+
+    // Response wrapper shape only appears when `export` was requested.
+    let written = parsed["exported_to"].as_str().expect("exported_to set");
+    assert!(parsed["data"].is_array(), "data is the original result");
+    assert!(
+        written.ends_with("exports/out.csv") || written.ends_with("exports\\out.csv"),
+        "exported_to points at the requested path, got {}",
+        written
+    );
+
+    // File exists on disk and has the right shape.
+    let csv = std::fs::read_to_string(written).expect("export file written");
+    assert!(csv.contains(','), "default CSV delimiter is comma");
+    assert!(csv.contains("alpha") && csv.contains("beta"));
+}
+
+#[test]
+fn query_without_export_keeps_raw_response_shape() {
+    // Regression: existing MCP clients see the same array shape they
+    // got before; the wrapper only kicks in when export is set.
+    let vault = fixture_vault();
+    let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query","arguments":{"folder":"notes"}}}"#;
+    let lines = run_session(vault.path(), &[req]);
+    let resp = pick_response(&lines, 2);
+    let body = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert!(parsed.is_array(), "no export ⇒ no wrapper, raw array");
+}
+
+#[test]
+fn query_export_xlsx_writes_valid_workbook() {
+    let vault = fixture_vault();
+    let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query","arguments":{"folder":"notes","export":"out.xlsx"}}}"#;
+    let lines = run_session(vault.path(), &[req]);
+    let resp = pick_response(&lines, 2);
+    let body = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+    let written = parsed["exported_to"].as_str().unwrap();
+    let bytes = std::fs::read(written).unwrap();
+    // XLSX is a ZIP, so it must start with PK\x03\x04.
+    assert_eq!(&bytes[..4], b"PK\x03\x04", "XLSX is a ZIP container");
+}
+
+#[test]
+fn query_export_csv_semicolon_delimiter() {
+    let vault = fixture_vault();
+    let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query","arguments":{"folder":"notes","export":"semi.csv","csv_delimiter":"semicolon"}}}"#;
+    let lines = run_session(vault.path(), &[req]);
+    let resp = pick_response(&lines, 2);
+    let body = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+    let written = parsed["exported_to"].as_str().unwrap();
+    let csv = std::fs::read_to_string(written).unwrap();
+    let header = csv.lines().next().unwrap();
+    assert!(header.contains(';'), "header uses semicolon: {}", header);
+    assert!(!header.contains(','), "no comma in semicolon mode");
+}
+
+#[test]
+fn query_export_rejects_parent_dir_escape() {
+    let vault = fixture_vault();
+    let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query","arguments":{"folder":"notes","export":"../escape.csv"}}}"#;
+    let lines = run_session(vault.path(), &[req]);
+    let resp = pick_response(&lines, 2);
+    // rmcp surfaces `ErrorData::invalid_params` as a JSON-RPC `error`
+    // object (code -32602), not a tool result with `isError`. Confirm
+    // the export refusal lands there with the explanatory message.
+    let err_msg = resp["error"]["message"]
+        .as_str()
+        .expect("expected JSON-RPC error response for path escape");
+    assert!(
+        err_msg.contains("..") || err_msg.contains("export"),
+        "expected an export refusal error, got: {}",
+        err_msg
+    );
+}
+
+#[test]
+fn traverse_export_yaml_works_for_non_record_tool() {
+    let vault = fixture_vault();
+    let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"traverse","arguments":{"name":"alpha","depth":1,"export":"hits.yaml"}}}"#;
+    let lines = run_session(vault.path(), &[req]);
+    let resp = pick_response(&lines, 2);
+    let body = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+    let written = parsed["exported_to"]
+        .as_str()
+        .expect("traverse exports too");
+    let yaml = std::fs::read_to_string(written).unwrap();
+    // YAML output contains the structured hits.
+    assert!(
+        yaml.contains("name") || yaml.contains("alpha"),
+        "got: {}",
+        yaml
+    );
+}
+
+#[test]
 fn plan_update_describes_change_without_writing() {
     let vault = fixture_vault();
     let beta_path = vault.path().join("notes/beta.md");
