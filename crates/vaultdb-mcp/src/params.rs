@@ -121,14 +121,27 @@ pub struct SchemaInferParams {
 // ── Plan-only mutation tools ───────────────────────────────────────────────
 
 /// Parameters for the `plan_update` tool.
+///
+/// Two ways to specify field updates:
+/// - `set` (legacy) — `"field=value"` strings; value parsed via
+///   `Value::parse_scalar` (i64 → f64 → String fallback). Kept for
+///   backward compatibility with older MCP clients.
+/// - `set_typed` (preferred) — typed JSON object matching
+///   `plan_create`'s shape. Strings stay strings, numbers stay typed,
+///   lists/maps recurse. New clients should use this; mixing both
+///   forms is allowed (`set_typed` wins on key collision).
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct PlanUpdateParams {
     pub folder: String,
     /// where-DSL string selecting which records to update.
     pub r#where: String,
-    /// `field=value` strings; the value is parsed as integer / float / string.
+    /// Legacy `field=value` strings.
     #[serde(default)]
     pub set: Vec<String>,
+    /// Preferred typed-map alternative to `set`. Same shape as
+    /// `plan_create`'s `set` field.
+    #[serde(default)]
+    pub set_typed: std::collections::BTreeMap<String, serde_json::Value>,
     /// Field names to remove.
     #[serde(default)]
     pub unset: Vec<String>,

@@ -28,6 +28,15 @@ use crate::params::{
 };
 
 pub fn plan_update(vault: &Vault, params: PlanUpdateParams) -> Result<MutationReport, ErrorData> {
+    build_update(params)?
+        .plan(vault)
+        .map_err(|e| invalid_params(format!("plan_update failed: {}", e)))
+}
+
+/// Shared UpdateBuilder construction for plan_update / execute_update.
+/// Applies legacy `set` first, then `set_typed` (so typed values win
+/// on key collision — new code naturally takes precedence).
+fn build_update(params: PlanUpdateParams) -> Result<UpdateBuilder, ErrorData> {
     let filter = parse_where(&params.r#where)?;
     let mut builder = UpdateBuilder::new(params.folder, filter);
 
@@ -36,6 +45,9 @@ pub fn plan_update(vault: &Vault, params: PlanUpdateParams) -> Result<MutationRe
             invalid_params(format!("--set requires FIELD=VALUE format, got: {}", s))
         })?;
         builder = builder.set(field.trim(), Value::parse_scalar(value_str.trim()));
+    }
+    for (field, json_value) in params.set_typed {
+        builder = builder.set(field, json_to_vaultdb_value(json_value));
     }
     for field in params.unset {
         builder = builder.unset(field);
@@ -46,10 +58,7 @@ pub fn plan_update(vault: &Vault, params: PlanUpdateParams) -> Result<MutationRe
     for tag in params.remove_tag {
         builder = builder.remove_tag(tag);
     }
-
-    builder
-        .plan(vault)
-        .map_err(|e| invalid_params(format!("plan_update failed: {}", e)))
+    Ok(builder)
 }
 
 pub fn plan_delete(vault: &Vault, params: PlanDeleteParams) -> Result<MutationReport, ErrorData> {
@@ -112,26 +121,7 @@ pub fn execute_update(
 ) -> Result<MutationReport, ErrorData> {
     let folder = params.folder.clone();
     let where_str = params.r#where.clone();
-    let filter = parse_where(&params.r#where)?;
-    let mut builder = UpdateBuilder::new(params.folder, filter);
-
-    for s in params.set {
-        let (field, value_str) = s.split_once('=').ok_or_else(|| {
-            invalid_params(format!("--set requires FIELD=VALUE format, got: {}", s))
-        })?;
-        builder = builder.set(field.trim(), Value::parse_scalar(value_str.trim()));
-    }
-    for field in params.unset {
-        builder = builder.unset(field);
-    }
-    for tag in params.add_tag {
-        builder = builder.add_tag(tag);
-    }
-    for tag in params.remove_tag {
-        builder = builder.remove_tag(tag);
-    }
-
-    let report = builder
+    let report = build_update(params)?
         .execute(vault)
         .map_err(|e| invalid_params(format!("execute_update failed: {}", e)))?;
     audit(
