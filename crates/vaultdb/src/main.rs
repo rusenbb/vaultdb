@@ -41,6 +41,8 @@ fn run() -> Result<()> {
             linked_from,
             links_to_where,
             linked_from_where,
+            output,
+            csv_delimiter,
         } => {
             let relational = commands::query::RelationalFilters {
                 links_to: links_to.clone(),
@@ -60,6 +62,8 @@ fn run() -> Result<()> {
                 &relational,
                 cli.recursive,
                 cli.verbose,
+                output.as_deref(),
+                *csv_delimiter,
             )
         }
 

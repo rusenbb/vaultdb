@@ -15,15 +15,16 @@ path = "src/main.rs"
 
 [dependencies]
 # Path + version: local dev links via `path`, crates.io resolves via
-# `version`. Required for publishing the CLI alongside the library.
-vaultdb-core = { path = "../vaultdb-core", version = "1.1.1" }
+# `version`. Required for publishing the CLI alongside the library. The
+# `xlsx` feature is enabled so `vaultdb query --output foo.xlsx` works
+# out of the box.
+vaultdb-core = { path = "../vaultdb-core", version = "1.1.1", features = ["xlsx"] }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 comfy-table = "7"
 colored = "2"
 anyhow.workspace = true
-csv = "1"
 
 [dev-dependencies]
 tempfile.workspace = true
