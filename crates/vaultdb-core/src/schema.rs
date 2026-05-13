@@ -69,7 +69,23 @@ pub struct FieldSchema {
     pub min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+    /// Static default applied when a record is created without an explicit
+    /// value for this field. Validated against `field_type` and `enum_values`
+    /// at schema load time, so bad defaults fail loudly rather than silently
+    /// landing in user files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+    /// Dynamic default — one of the closed enum values `today`, `now`,
+    /// `epoch`. Resolved at the moment a record is created, not at schema
+    /// load. Mutually exclusive with `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_expr: Option<String>,
 }
+
+/// Recognised values for `FieldSchema::default_expr`. Any other value is
+/// rejected at schema load time. Resolution happens elsewhere (in
+/// `CreateBuilder`, Phase 3) — this enum is just the contract.
+pub const DEFAULT_EXPRS: &[&str] = &["today", "now", "epoch"];
 
 /// Load schema from a file.
 ///
@@ -77,12 +93,100 @@ pub struct FieldSchema {
 /// reason — the underlying YAML parser is an implementation detail and is
 /// deliberately not exposed in the public error type, so consumers don't
 /// transitively depend on whichever YAML crate vaultdb chooses today.
+///
+/// After parsing, every field's `default` and `default_expr` is validated:
+/// - `default_expr` must be one of [`DEFAULT_EXPRS`].
+/// - `default` literals must be compatible with `field_type`.
+/// - `default` literals must satisfy `enum_values` when both are set.
+/// - `default` and `default_expr` are mutually exclusive.
 pub fn load_schema(path: &Path) -> Result<VaultSchema> {
     let content = std::fs::read_to_string(path).map_err(|_| {
         VaultdbError::SchemaError(format!("cannot read schema file: {}", path.display()))
     })?;
-    serde_yaml::from_str(&content)
-        .map_err(|e| VaultdbError::SchemaError(format!("parsing {}: {}", path.display(), e)))
+    let parsed: VaultSchema = serde_yaml::from_str(&content)
+        .map_err(|e| VaultdbError::SchemaError(format!("parsing {}: {}", path.display(), e)))?;
+    validate_schema_defaults(&parsed)?;
+    Ok(parsed)
+}
+
+/// Walk every field in every collection and check that any declared
+/// defaults are well-formed. Exposed publicly so consumers that build a
+/// `VaultSchema` in code (not by loading a file) can run the same check.
+pub fn validate_schema_defaults(schema: &VaultSchema) -> Result<()> {
+    for (col_name, col) in &schema.collections {
+        for (field_name, field) in &col.fields {
+            validate_field_defaults(col_name, field_name, field)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_field_defaults(col: &str, field: &str, schema: &FieldSchema) -> Result<()> {
+    if schema.default.is_some() && schema.default_expr.is_some() {
+        return Err(VaultdbError::SchemaError(format!(
+            "collection '{}', field '{}': `default` and `default_expr` are mutually exclusive",
+            col, field
+        )));
+    }
+
+    if let Some(expr) = &schema.default_expr
+        && !DEFAULT_EXPRS.contains(&expr.as_str())
+    {
+        return Err(VaultdbError::SchemaError(format!(
+            "collection '{}', field '{}': default_expr '{}' is not recognised (expected one of {:?})",
+            col, field, expr, DEFAULT_EXPRS
+        )));
+    }
+
+    if let Some(val) = &schema.default {
+        // Type compatibility check. Reuses `type_matches` so the rules
+        // stay aligned with what `validate_record` enforces at runtime.
+        let actual = val.type_name();
+        if !type_matches(actual, &schema.field_type) {
+            return Err(VaultdbError::SchemaError(format!(
+                "collection '{}', field '{}': default has type '{}', incompatible with field type '{}'",
+                col, field, actual, schema.field_type
+            )));
+        }
+
+        // Format check for constrained string types. A bad `default:
+        // 2024-99-99` should fail at schema load, not when a user
+        // creates a note.
+        if let Value::String(s) = val {
+            let format_ok = match schema.field_type.as_str() {
+                "wikilink" => is_valid_wikilink(s),
+                "date" => is_valid_date(s),
+                "url" => is_valid_url(s),
+                _ => true,
+            };
+            if !format_ok {
+                return Err(VaultdbError::SchemaError(format!(
+                    "collection '{}', field '{}': default '{}' is not a valid {}",
+                    col, field, s, schema.field_type
+                )));
+            }
+        }
+
+        // Enum compatibility.
+        if !schema.enum_values.is_empty() {
+            let display = val.display_value();
+            let matches_enum = schema.enum_values.iter().any(|e| match e {
+                Value::String(s) => s == &display,
+                Value::Integer(i) => i.to_string() == display,
+                Value::Float(f) => f.to_string() == display,
+                Value::Bool(b) => b.to_string() == display,
+                _ => false,
+            });
+            if !matches_enum {
+                return Err(VaultdbError::SchemaError(format!(
+                    "collection '{}', field '{}': default '{}' is not in `enum` values",
+                    col, field, display
+                )));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Serialize a schema to YAML string.
@@ -397,6 +501,8 @@ pub fn infer_schema(folder_name: &str, records: &[crate::record::Record]) -> Col
                 enum_values,
                 min: None,
                 max: None,
+                default: None,
+                default_expr: None,
             },
         );
         // `required` is tracked at the collection level (above); kept out
@@ -456,6 +562,8 @@ mod tests {
                 enum_values: vec![],
                 min: None,
                 max: None,
+                default: None,
+                default_expr: None,
             },
         );
 
@@ -486,6 +594,8 @@ mod tests {
                 ],
                 min: None,
                 max: None,
+                default: None,
+                default_expr: None,
             },
         );
 
@@ -513,6 +623,8 @@ mod tests {
                 enum_values: vec![],
                 min: Some(1.0),
                 max: Some(10.0),
+                default: None,
+                default_expr: None,
             },
         );
 
@@ -540,6 +652,8 @@ mod tests {
                 enum_values: vec![Value::String("to-watch".into())],
                 min: None,
                 max: None,
+                default: None,
+                default_expr: None,
             },
         );
 
@@ -587,6 +701,8 @@ mod tests {
                 enum_values: vec![],
                 min: None,
                 max: None,
+                default: None,
+                default_expr: None,
             },
         );
         CollectionSchema {
@@ -718,5 +834,191 @@ mod tests {
         let record = make_record(vec![("university", Value::Integer(42))]);
         let violations = validate_record("p.md", &record.fields, &schema);
         assert!(violations.iter().any(|v| v.message.contains("type")));
+    }
+
+    // ── Phase 2: default / default_expr validation at load time ────────
+
+    fn schema_with_defaulted_field(
+        name: &str,
+        field_type: &str,
+        default: Option<Value>,
+        default_expr: Option<String>,
+        enum_values: Vec<Value>,
+    ) -> VaultSchema {
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            name.into(),
+            FieldSchema {
+                field_type: field_type.into(),
+                enum_values,
+                min: None,
+                max: None,
+                default,
+                default_expr,
+            },
+        );
+        VaultSchema {
+            collections: BTreeMap::from([(
+                "movies".to_string(),
+                CollectionSchema {
+                    description: None,
+                    folder: "Notes/movie".into(),
+                    filter: vec![],
+                    required: vec![],
+                    fields,
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn default_literal_matching_type_passes() {
+        let s = schema_with_defaulted_field(
+            "year",
+            "integer",
+            Some(Value::Integer(2024)),
+            None,
+            vec![],
+        );
+        assert!(validate_schema_defaults(&s).is_ok());
+    }
+
+    #[test]
+    fn default_literal_wrong_type_rejected() {
+        let s = schema_with_defaulted_field(
+            "year",
+            "integer",
+            Some(Value::String("nope".into())),
+            None,
+            vec![],
+        );
+        let err = validate_schema_defaults(&s).unwrap_err().to_string();
+        assert!(err.contains("incompatible"), "got: {}", err);
+        assert!(err.contains("year"));
+    }
+
+    #[test]
+    fn default_literal_outside_enum_rejected() {
+        let s = schema_with_defaulted_field(
+            "status",
+            "string",
+            Some(Value::String("invalid".into())),
+            None,
+            vec![
+                Value::String("to-watch".into()),
+                Value::String("watched".into()),
+            ],
+        );
+        let err = validate_schema_defaults(&s).unwrap_err().to_string();
+        assert!(err.contains("enum"), "got: {}", err);
+    }
+
+    #[test]
+    fn default_literal_inside_enum_passes() {
+        let s = schema_with_defaulted_field(
+            "status",
+            "string",
+            Some(Value::String("to-watch".into())),
+            None,
+            vec![
+                Value::String("to-watch".into()),
+                Value::String("watched".into()),
+            ],
+        );
+        assert!(validate_schema_defaults(&s).is_ok());
+    }
+
+    #[test]
+    fn default_expr_known_keyword_passes() {
+        for expr in DEFAULT_EXPRS {
+            let s =
+                schema_with_defaulted_field("due", "date", None, Some(expr.to_string()), vec![]);
+            assert!(
+                validate_schema_defaults(&s).is_ok(),
+                "default_expr '{}' should be valid",
+                expr
+            );
+        }
+    }
+
+    #[test]
+    fn default_expr_unknown_keyword_rejected() {
+        let s = schema_with_defaulted_field("due", "date", None, Some("tomorrow".into()), vec![]);
+        let err = validate_schema_defaults(&s).unwrap_err().to_string();
+        assert!(err.contains("default_expr"), "got: {}", err);
+        assert!(err.contains("tomorrow"));
+    }
+
+    #[test]
+    fn default_and_default_expr_mutually_exclusive() {
+        let s = schema_with_defaulted_field(
+            "due",
+            "date",
+            Some(Value::String("2024-05-13".into())),
+            Some("today".into()),
+            vec![],
+        );
+        let err = validate_schema_defaults(&s).unwrap_err().to_string();
+        assert!(err.contains("mutually exclusive"), "got: {}", err);
+    }
+
+    #[test]
+    fn default_for_wikilink_must_be_well_formed() {
+        let s = schema_with_defaulted_field(
+            "university",
+            "wikilink",
+            Some(Value::String("kyoto".into())),
+            None,
+            vec![],
+        );
+        let err = validate_schema_defaults(&s).unwrap_err().to_string();
+        assert!(err.contains("wikilink"), "got: {}", err);
+
+        // And the right shape passes.
+        let s = schema_with_defaulted_field(
+            "university",
+            "wikilink",
+            Some(Value::String("[[kyoto-university-KG9l]]".into())),
+            None,
+            vec![],
+        );
+        assert!(validate_schema_defaults(&s).is_ok());
+    }
+
+    #[test]
+    fn default_for_date_must_be_well_formed() {
+        let s = schema_with_defaulted_field(
+            "due",
+            "date",
+            Some(Value::String("2024-99-99".into())),
+            None,
+            vec![],
+        );
+        let err = validate_schema_defaults(&s).unwrap_err().to_string();
+        assert!(err.contains("date"), "got: {}", err);
+    }
+
+    #[test]
+    fn load_schema_runs_default_validation() {
+        // End-to-end: write a YAML with a bad default to disk, load it,
+        // and verify we get a SchemaError pointing at the field.
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            tmp,
+            r#"
+collections:
+  movies:
+    folder: Notes/movie
+    fields:
+      year:
+        type: integer
+        default: "not an integer"
+"#
+        )
+        .unwrap();
+        let err = load_schema(tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("year"), "got: {}", err);
+        assert!(err.contains("incompatible"), "got: {}", err);
     }
 }
