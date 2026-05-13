@@ -68,7 +68,9 @@ impl Format {
             Some("xlsx") => Ok(Format::Xlsx),
             #[cfg(not(feature = "xlsx"))]
             Some("xlsx") => Err(VaultdbError::SafetyRefused {
-                reason: "xlsx export unavailable: vaultdb-core was built without the 'xlsx' feature".into(),
+                reason:
+                    "xlsx export unavailable: vaultdb-core was built without the 'xlsx' feature"
+                        .into(),
             }),
             Some("md") => Err(VaultdbError::SafetyRefused {
                 reason: format!(
@@ -133,10 +135,7 @@ pub fn resolve_export_path(vault_root: &Path, requested: &Path) -> Result<PathBu
     for component in requested.components() {
         if matches!(component, Component::ParentDir) {
             return Err(VaultdbError::SafetyRefused {
-                reason: format!(
-                    "export path must not contain '..': {}",
-                    requested.display()
-                ),
+                reason: format!("export path must not contain '..': {}", requested.display()),
             });
         }
         if matches!(component, Component::Prefix(_) | Component::RootDir) {
@@ -162,9 +161,11 @@ pub fn resolve_export_path(vault_root: &Path, requested: &Path) -> Result<PathBu
     }
 
     let candidate = vault_root.join(requested);
-    let parent = candidate.parent().ok_or_else(|| VaultdbError::SafetyRefused {
-        reason: format!("export path has no parent: {}", requested.display()),
-    })?;
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| VaultdbError::SafetyRefused {
+            reason: format!("export path has no parent: {}", requested.display()),
+        })?;
     let file_name = candidate
         .file_name()
         .ok_or_else(|| VaultdbError::SafetyRefused {
@@ -479,10 +480,7 @@ fn json_to_table(value: &serde_json::Value) -> Option<(Vec<String>, Vec<Vec<Stri
         }
         JV::Array(items) if items.iter().all(|v| !v.is_array() && !v.is_object()) => {
             let header = vec!["value".to_string()];
-            let rows = items
-                .iter()
-                .map(|v| vec![json_to_cell_string(v)])
-                .collect();
+            let rows = items.iter().map(|v| vec![json_to_cell_string(v)]).collect();
             Some((header, rows))
         }
         JV::Object(_) => {
@@ -666,8 +664,14 @@ mod tests {
 
     #[test]
     fn format_json_yaml() {
-        assert_eq!(Format::from_path(Path::new("a.json")).unwrap(), Format::Json);
-        assert_eq!(Format::from_path(Path::new("a.yaml")).unwrap(), Format::Yaml);
+        assert_eq!(
+            Format::from_path(Path::new("a.json")).unwrap(),
+            Format::Json
+        );
+        assert_eq!(
+            Format::from_path(Path::new("a.yaml")).unwrap(),
+            Format::Yaml
+        );
         assert_eq!(Format::from_path(Path::new("a.yml")).unwrap(), Format::Yaml);
     }
 
@@ -852,7 +856,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let records = vec![rec("Alpha", &dir, &[("x", Value::Integer(1))])];
         let fmt = Format::from_path(Path::new("out.tsv")).unwrap();
-        let path = export_records(v.path(), Path::new("out.tsv"), fmt, &records, None, None).unwrap();
+        let path =
+            export_records(v.path(), Path::new("out.tsv"), fmt, &records, None, None).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         let header = body.lines().next().unwrap();
         assert!(header.contains('\t'));
@@ -863,7 +868,11 @@ mod tests {
         let v = vault();
         let dir = v.path().join("notes");
         std::fs::create_dir_all(&dir).unwrap();
-        let records = vec![rec("Alpha", &dir, &[("status", Value::String("active".into()))])];
+        let records = vec![rec(
+            "Alpha",
+            &dir,
+            &[("status", Value::String("active".into()))],
+        )];
         let path = export_records(
             v.path(),
             Path::new("out.yaml"),
