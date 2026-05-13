@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use colored::Colorize;
 
-use crate::cli::OutputFormat;
+use crate::cli::{CsvDelimiter, OutputFormat};
 use crate::output;
 use vaultdb_core::links::LinkGraph;
 use vaultdb_core::record::{Record, Value};
+use vaultdb_core::render;
 use vaultdb_core::vault::Vault;
 use vaultdb_core::{Expr, LinkPredicate};
 
@@ -94,6 +96,8 @@ pub fn run_query(
     relational: &RelationalFilters,
     recursive: bool,
     verbose: bool,
+    output_path: Option<&Path>,
+    csv_delimiter: CsvDelimiter,
 ) -> Result<()> {
     let folder_path = vault.resolve_folder(folder)?;
     let filter = build_filter(where_strs, relational)?;
@@ -151,6 +155,34 @@ pub fn run_query(
         .as_ref()
         .map(|s| s.split(',').map(|f| f.trim().to_string()).collect())
         .unwrap_or_default();
+
+    // `--output <path>` short-circuits stdout: we render via the core
+    // renderer to a file under the vault, print the resolved path, and
+    // skip the table/JSON/etc. dump that would normally go to stdout.
+    if let Some(out_path) = output_path {
+        let fmt = render::Format::from_path(out_path)
+            .context("inferring export format from --output extension")?
+            .with_csv_delimiter(csv_delimiter.as_byte());
+        let select_opt: Option<&[String]> = if select_fields.is_empty() {
+            None
+        } else {
+            Some(&select_fields)
+        };
+        let written = render::export_records(
+            &vault.root,
+            out_path,
+            fmt,
+            &filtered,
+            select_opt,
+            link_index.as_ref(),
+        )
+        .context("writing export file")?;
+        println!("{}", written.display());
+        if verbose {
+            eprintln!("{} record(s) exported", filtered.len());
+        }
+        return Ok(());
+    }
 
     let out = output::format_records_with_links(
         &filtered,

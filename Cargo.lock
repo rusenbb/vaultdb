@@ -1852,7 +1852,6 @@ dependencies = [
  "clap",
  "colored",
  "comfy-table",
- "csv",
  "predicates",
  "serde",
  "serde_json",

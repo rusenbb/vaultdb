@@ -74,6 +74,22 @@ pub enum Command {
         /// Filter to notes linked from any note matching this condition
         #[arg(long = "linked-from-where", num_args = 1)]
         linked_from_where: Vec<String>,
+
+        /// Save results to a file under the vault root.
+        ///
+        /// Path is vault-relative; `..` and absolute paths are rejected.
+        /// The file format is inferred from the extension: `.csv`, `.tsv`,
+        /// `.json`, `.yaml`/`.yml`, `.xlsx`. On filename collision the
+        /// renderer auto-suffixes `(1)`, `(2)`, ... When set, results are
+        /// not printed to stdout (the resolved output path is printed
+        /// instead).
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+
+        /// CSV/TSV delimiter override. Applies only when `--output`'s
+        /// extension is `.csv` or `.tsv`.
+        #[arg(long = "csv-delimiter", default_value = "comma")]
+        csv_delimiter: CsvDelimiter,
     },
 
     /// Count matching records
@@ -276,4 +292,24 @@ pub enum LinkDirection {
     Outgoing,
     Incoming,
     Both,
+}
+
+/// CSV / TSV delimiter selector for `--csv-delimiter`. Named variants
+/// because shells make literal `;` and `\t` awkward to pass through.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CsvDelimiter {
+    Comma,
+    Semicolon,
+    Tab,
+}
+
+impl CsvDelimiter {
+    /// Byte value for `csv::WriterBuilder::delimiter`.
+    pub fn as_byte(self) -> u8 {
+        match self {
+            CsvDelimiter::Comma => b',',
+            CsvDelimiter::Semicolon => b';',
+            CsvDelimiter::Tab => b'\t',
+        }
+    }
 }
