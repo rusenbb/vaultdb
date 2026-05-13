@@ -1,2 +1,4 @@
 /target
 /.worktrees
+# Claude Code runtime artifacts (scheduled-tasks lock, worktree state, …)
+/.claude
