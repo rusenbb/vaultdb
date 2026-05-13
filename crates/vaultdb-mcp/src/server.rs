@@ -24,18 +24,39 @@ use crate::params::{
 };
 use crate::tools;
 
+/// Which `execute_*` tools are armed. Set by command-line flags at
+/// server launch. Each tool method checks the corresponding bit before
+/// touching disk and returns a typed error otherwise — the tool surface
+/// itself is always present so MCP clients see a stable schema, but
+/// calling an unarmed tool fails with a clear "not allowed" message.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecutePermissions {
+    pub create: bool,
+    pub update: bool,
+    pub delete: bool,
+    pub permanent_delete: bool,
+}
+
+impl ExecutePermissions {
+    pub fn any(&self) -> bool {
+        self.create || self.update || self.delete || self.permanent_delete
+    }
+}
+
 /// MCP server state. Holds an optional [`Vault`] (the server boots even
 /// without a vault so tool calls can return a typed error rather than
 /// the binary crashing on launch).
 #[derive(Clone)]
 pub struct VaultdbServer {
     vault: std::sync::Arc<Option<Vault>>,
+    permissions: ExecutePermissions,
 }
 
 impl VaultdbServer {
-    pub fn new(vault: Option<Vault>) -> Self {
+    pub fn new(vault: Option<Vault>, permissions: ExecutePermissions) -> Self {
         Self {
             vault: std::sync::Arc::new(vault),
+            permissions,
         }
     }
 
@@ -49,6 +70,20 @@ impl VaultdbServer {
                 None,
             )
         })
+    }
+
+    fn require(&self, allowed: bool, flag: &str) -> Result<(), ErrorData> {
+        if allowed {
+            Ok(())
+        } else {
+            Err(ErrorData::invalid_params(
+                format!(
+                    "this tool is disabled. Launch vaultdb-mcp with --{} to enable it.",
+                    flag
+                ),
+                None,
+            ))
+        }
     }
 }
 
@@ -169,5 +204,58 @@ impl VaultdbServer {
     )]
     fn plan_create(&self, params: Parameters<PlanCreateParams>) -> Result<String, ErrorData> {
         json_string(tools::mutations::plan_create(self.vault()?, params.0)?)
+    }
+
+    // ── Execute tools (flag-gated) ─────────────────────────────────────────
+    //
+    // Each of these mutates the vault and is therefore disabled by
+    // default. Launch vaultdb-mcp with the corresponding
+    // --dangerously-allow-* flag to arm. Every successful execute call
+    // appends a line to `<vault>/.vaultdb/audit.log`.
+
+    #[tool(
+        description = "Execute create. Writes the file plan_create would preview. Requires --dangerously-allow-create at launch."
+    )]
+    fn execute_create(&self, params: Parameters<PlanCreateParams>) -> Result<String, ErrorData> {
+        self.require(self.permissions.create, "dangerously-allow-create")?;
+        json_string(tools::mutations::execute_create(self.vault()?, params.0)?)
+    }
+
+    #[tool(
+        description = "Execute update. Applies the changes plan_update would preview. Requires --dangerously-allow-update at launch."
+    )]
+    fn execute_update(&self, params: Parameters<PlanUpdateParams>) -> Result<String, ErrorData> {
+        self.require(self.permissions.update, "dangerously-allow-update")?;
+        json_string(tools::mutations::execute_update(self.vault()?, params.0)?)
+    }
+
+    #[tool(
+        description = "Execute move. Relocates files to the destination folder. Requires --dangerously-allow-update at launch."
+    )]
+    fn execute_move(&self, params: Parameters<PlanMoveParams>) -> Result<String, ErrorData> {
+        self.require(self.permissions.update, "dangerously-allow-update")?;
+        json_string(tools::mutations::execute_move(self.vault()?, params.0)?)
+    }
+
+    #[tool(
+        description = "Execute rename. Renames the file and rewrites every wikilink across the vault. Requires --dangerously-allow-update at launch."
+    )]
+    fn execute_rename(&self, params: Parameters<PlanRenameParams>) -> Result<String, ErrorData> {
+        self.require(self.permissions.update, "dangerously-allow-update")?;
+        json_string(tools::mutations::execute_rename(self.vault()?, params.0)?)
+    }
+
+    #[tool(
+        description = "Execute delete. Soft-deletes to .trash/ by default. Requires --dangerously-allow-delete at launch. Setting permanent=true ALSO requires --dangerously-allow-permanent-delete."
+    )]
+    fn execute_delete(&self, params: Parameters<PlanDeleteParams>) -> Result<String, ErrorData> {
+        self.require(self.permissions.delete, "dangerously-allow-delete")?;
+        if params.0.permanent {
+            self.require(
+                self.permissions.permanent_delete,
+                "dangerously-allow-permanent-delete",
+            )?;
+        }
+        json_string(tools::mutations::execute_delete(self.vault()?, params.0)?)
     }
 }

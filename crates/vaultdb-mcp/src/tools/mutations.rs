@@ -1,12 +1,18 @@
-//! Plan-only mutation tools: `plan_create`, `plan_update`, `plan_delete`,
-//! `plan_move`, `plan_rename`.
+//! MCP mutation tools.
 //!
-//! These tools never write to disk. They produce a `MutationReport`
-//! describing what would change. The host is expected to render the
-//! report to a human, get explicit consent, and then run the equivalent
-//! mutation through a non-MCP path (the CLI, or a Tauri command in the
-//! eduport case). This is the "plan-only mutation tools" rule from the
-//! spec — agents propose, humans approve, hosts execute.
+//! Two flavours: `plan_*` previews never touch disk and are always
+//! available. `execute_*` actually writes and is gated by the launch
+//! flags `--dangerously-allow-create / -update / -delete /
+//! -permanent-delete` — without the flag, the corresponding execute
+//! tool returns a typed error explaining how to enable it.
+//!
+//! The default mode (no flags) preserves the "agents propose, humans
+//! approve, hosts execute" pattern from the spec. The opt-in flags
+//! shift execution to the agent for sessions where that's the desired
+//! ergonomics.
+//!
+//! Every successful execute call appends a line to
+//! `<vault>/.vaultdb/audit.log`.
 
 use rmcp::ErrorData;
 use vaultdb_core::mutation::{
@@ -68,30 +74,216 @@ pub fn plan_rename(vault: &Vault, params: PlanRenameParams) -> Result<MutationRe
 }
 
 pub fn plan_create(vault: &Vault, params: PlanCreateParams) -> Result<MutationReport, ErrorData> {
-    let mut builder = CreateBuilder::new(params.folder.clone(), params.name);
+    build_create(vault, params)?
+        .plan(vault)
+        .map_err(|e| invalid_params(format!("plan_create failed: {}", e)))
+}
+
+// ── Execute variants ──────────────────────────────────────────────────────
+//
+// Each calls the corresponding `.execute()` on the underlying builder and
+// appends a line to `<vault>/.vaultdb/audit.log` on success. The audit
+// hook lives at the MCP boundary on purpose — the goal is to record what
+// _this MCP server_ did on behalf of an agent, not to track every
+// vaultdb-core caller.
+
+pub fn execute_create(
+    vault: &Vault,
+    params: PlanCreateParams,
+) -> Result<MutationReport, ErrorData> {
+    let folder = params.folder.clone();
+    let name = params.name.clone();
+    let builder = build_create(vault, params)?;
+    let report = builder
+        .execute(vault)
+        .map_err(|e| invalid_params(format!("execute_create failed: {}", e)))?;
+    audit(
+        &vault.root,
+        "execute_create",
+        &format!("folder={} name={}", folder, name),
+        &report,
+    );
+    Ok(report)
+}
+
+pub fn execute_update(
+    vault: &Vault,
+    params: PlanUpdateParams,
+) -> Result<MutationReport, ErrorData> {
+    let folder = params.folder.clone();
+    let where_str = params.r#where.clone();
+    let filter = parse_where(&params.r#where)?;
+    let mut builder = UpdateBuilder::new(params.folder, filter);
+
+    for s in params.set {
+        let (field, value_str) = s.split_once('=').ok_or_else(|| {
+            invalid_params(format!("--set requires FIELD=VALUE format, got: {}", s))
+        })?;
+        builder = builder.set(field.trim(), Value::parse_scalar(value_str.trim()));
+    }
+    for field in params.unset {
+        builder = builder.unset(field);
+    }
+    for tag in params.add_tag {
+        builder = builder.add_tag(tag);
+    }
+    for tag in params.remove_tag {
+        builder = builder.remove_tag(tag);
+    }
+
+    let report = builder
+        .execute(vault)
+        .map_err(|e| invalid_params(format!("execute_update failed: {}", e)))?;
+    audit(
+        &vault.root,
+        "execute_update",
+        &format!("folder={} where={:?}", folder, where_str),
+        &report,
+    );
+    Ok(report)
+}
+
+pub fn execute_delete(
+    vault: &Vault,
+    params: PlanDeleteParams,
+) -> Result<MutationReport, ErrorData> {
+    let folder = params.folder.clone();
+    let where_str = params.r#where.clone();
+    let permanent = params.permanent;
+    let filter = parse_where(&params.r#where)?;
+    let report = DeleteBuilder::new(params.folder, filter)
+        .permanent(params.permanent)
+        .execute(vault)
+        .map_err(|e| invalid_params(format!("execute_delete failed: {}", e)))?;
+    audit(
+        &vault.root,
+        "execute_delete",
+        &format!(
+            "folder={} where={:?} permanent={}",
+            folder, where_str, permanent
+        ),
+        &report,
+    );
+    Ok(report)
+}
+
+pub fn execute_move(vault: &Vault, params: PlanMoveParams) -> Result<MutationReport, ErrorData> {
+    let folder = params.folder.clone();
+    let to = params.to.clone();
+    let where_str = params.r#where.clone();
+    let filter = parse_where(&params.r#where)?;
+    let report = MoveBuilder::new(params.folder, params.to, filter)
+        .execute(vault)
+        .map_err(|e| invalid_params(format!("execute_move failed: {}", e)))?;
+    audit(
+        &vault.root,
+        "execute_move",
+        &format!("folder={} to={} where={:?}", folder, to, where_str),
+        &report,
+    );
+    Ok(report)
+}
+
+pub fn execute_rename(
+    vault: &Vault,
+    params: PlanRenameParams,
+) -> Result<MutationReport, ErrorData> {
+    let folder = params.folder.clone();
+    let from = params.from.clone();
+    let to = params.to.clone();
+    let report = RenameBuilder::new(params.folder, params.from, params.to)
+        .execute(vault)
+        .map_err(|e| invalid_params(format!("execute_rename failed: {}", e)))?;
+    audit(
+        &vault.root,
+        "execute_rename",
+        &format!("folder={} from={} to={}", folder, from, to),
+        &report,
+    );
+    Ok(report)
+}
+
+/// Shared CreateBuilder construction for plan_create / execute_create.
+fn build_create(vault: &Vault, params: PlanCreateParams) -> Result<CreateBuilder, ErrorData> {
+    let folder = params.folder.clone();
+    let mut builder = CreateBuilder::new(folder.clone(), params.name);
 
     if let Some(t) = params.template {
         builder = builder.template(t);
     }
 
     for (field, json_value) in params.set {
-        let v = json_to_vaultdb_value(json_value);
-        builder = builder.set(field, v);
+        builder = builder.set(field, json_to_vaultdb_value(json_value));
     }
 
-    // Best-effort schema lookup: same logic as the CLI's `run_create`.
     let schema_path = schema::schema_path(&vault.root);
     if schema_path.is_file() {
         let vault_schema = schema::load_schema(&schema_path)
             .map_err(|e| invalid_params(format!("loading {}: {}", schema_path.display(), e)))?;
-        if let Some(collection) = vault_schema.collection_for_folder(&params.folder) {
+        if let Some(collection) = vault_schema.collection_for_folder(&folder) {
             builder = builder.with_schema(collection.clone());
         }
     }
 
-    builder
-        .plan(vault)
-        .map_err(|e| invalid_params(format!("plan_create failed: {}", e)))
+    Ok(builder)
+}
+
+/// Append a single line to `<vault>/.vaultdb/audit.log` describing the
+/// execute call. Best-effort: failures are silently ignored — losing
+/// audit entries is better than failing the actual mutation when, say,
+/// the filesystem is read-only. Tracing surfaces the failure for
+/// operators who care.
+fn audit(vault_root: &std::path::Path, tool: &str, params_summary: &str, report: &MutationReport) {
+    let dir = vault_root.join(".vaultdb");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %e, "audit log: cannot create .vaultdb/");
+        return;
+    }
+    let path = dir.join("audit.log");
+    let timestamp = audit_timestamp();
+    let line = format!(
+        "{} {} {} changes={} errors={}\n",
+        timestamp,
+        tool,
+        params_summary,
+        report.changes.len(),
+        report.errors.len()
+    );
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                tracing::warn!(error = %e, path = %path.display(), "audit log write failed");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "audit log open failed");
+        }
+    }
+}
+
+/// `YYYY-MM-DD HH:MM:SSZ` — second-precision UTC timestamp matching the
+/// existing `record::now_string` format with an explicit Z suffix for
+/// log parsing. Hand-rolled to keep the no-date-crate stance from core.
+fn audit_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    let date = vaultdb_core::record::today_string();
+    // today_string uses the same epoch arithmetic; reuse it for the date
+    // part, append HH:MM:SS computed from the same `secs`.
+    let _ = days; // already accounted for in today_string()
+    format!("{}T{:02}:{:02}:{:02}Z", date, h, m, s)
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────

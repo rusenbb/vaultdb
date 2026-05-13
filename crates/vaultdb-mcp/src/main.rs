@@ -23,6 +23,30 @@ struct Cli {
     /// Path to the Obsidian vault root (overrides VAULTDB_VAULT and auto-discovery).
     #[arg(long)]
     vault: Option<PathBuf>,
+
+    /// Allow execute_create — the MCP server will actually write new
+    /// notes when the client calls execute_create. Without this flag,
+    /// only plan_create (preview) is exposed.
+    #[arg(long)]
+    dangerously_allow_create: bool,
+
+    /// Allow execute_update, execute_move, execute_rename — the MCP
+    /// server will actually modify existing notes. Without this flag,
+    /// only the corresponding plan_* tools are exposed.
+    #[arg(long)]
+    dangerously_allow_update: bool,
+
+    /// Allow execute_delete — soft-delete by default (moves to
+    /// `.trash/`). Permanent deletion still requires the stronger
+    /// --dangerously-allow-permanent-delete in addition.
+    #[arg(long)]
+    dangerously_allow_delete: bool,
+
+    /// Allow execute_delete with permanent=true. Requires
+    /// --dangerously-allow-delete as well. Files removed this way go
+    /// to /dev/null — no undo.
+    #[arg(long)]
+    dangerously_allow_permanent_delete: bool,
 }
 
 /// Resolve the vault using --vault, then VAULTDB_VAULT, then
@@ -56,7 +80,24 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let vault = resolve_vault(&cli);
-    let server = server::VaultdbServer::new(vault);
+    let permissions = server::ExecutePermissions {
+        create: cli.dangerously_allow_create,
+        update: cli.dangerously_allow_update,
+        delete: cli.dangerously_allow_delete,
+        permanent_delete: cli.dangerously_allow_permanent_delete,
+    };
+    // Surface what's enabled so the user can spot misconfigurations
+    // in the logs without guessing.
+    if permissions.any() {
+        tracing::warn!(
+            create = permissions.create,
+            update = permissions.update,
+            delete = permissions.delete,
+            permanent_delete = permissions.permanent_delete,
+            "execute tools enabled — agent can mutate the vault"
+        );
+    }
+    let server = server::VaultdbServer::new(vault, permissions);
 
     let running = server
         .serve(stdio())
