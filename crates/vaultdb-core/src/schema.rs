@@ -413,9 +413,8 @@ fn filters_demonstrably_disjoint(a: &[String], b: &[String]) -> Result<bool> {
 fn parse_forced_equalities(filters: &[String]) -> Result<Vec<(String, Value)>> {
     let mut out = Vec::new();
     for f in filters {
-        let expr = crate::query::Expr::parse(f).map_err(|e| {
-            VaultdbError::SchemaError(format!("parsing filter '{}': {}", f, e))
-        })?;
+        let expr = crate::query::Expr::parse(f)
+            .map_err(|e| VaultdbError::SchemaError(format!("parsing filter '{}': {}", f, e)))?;
         collect_forced_equalities(&expr, &mut out);
     }
     Ok(out)
@@ -452,7 +451,13 @@ fn check_field_pair(
             "collections '{}' (folder '{}') and '{}' (folder '{}') both declare field '{}' \
              but with incompatible types '{}' vs '{}' — a single record under these folders \
              must satisfy both, so the types must match",
-            name_a, col_a.folder, name_b, col_b.folder, field_name, fs_a.field_type, fs_b.field_type
+            name_a,
+            col_a.folder,
+            name_b,
+            col_b.folder,
+            field_name,
+            fs_a.field_type,
+            fs_b.field_type
         )));
     }
 
@@ -1431,10 +1436,7 @@ collections:
         // Subset is the documented "narrowing" pattern (Notes.db-table
         // declares all valid values; movies.db-table narrows to one).
         let mut catchall = fs_basic("string");
-        catchall.enum_values = vec![
-            Value::String("movie".into()),
-            Value::String("book".into()),
-        ];
+        catchall.enum_values = vec![Value::String("movie".into()), Value::String("book".into())];
         let mut narrow = fs_basic("string");
         narrow.enum_values = vec![Value::String("movie".into())];
 

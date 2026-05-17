@@ -1005,20 +1005,17 @@ impl CreateBuilder {
                 fields: fields.clone(),
                 raw_content: None,
             };
-            let applicable = match vault_schema.applicable_collections(
-                &self.folder,
-                &projected,
-                &vault.root,
-            ) {
-                Ok(cols) => cols,
-                Err(e) => {
-                    errors.push(MutationError {
-                        path: dest.clone(),
-                        message: format!("evaluating schema applicability: {}", e),
-                    });
-                    return Ok((MutationReport { changes, errors }, None));
-                }
-            };
+            let applicable =
+                match vault_schema.applicable_collections(&self.folder, &projected, &vault.root) {
+                    Ok(cols) => cols,
+                    Err(e) => {
+                        errors.push(MutationError {
+                            path: dest.clone(),
+                            message: format!("evaluating schema applicability: {}", e),
+                        });
+                        return Ok((MutationReport { changes, errors }, None));
+                    }
+                };
 
             // Layer defaults. `applicable_collections` sorts shallowest-
             // folder first, so deeper folders naturally overwrite when
@@ -1979,10 +1976,7 @@ mod tests {
             "db-table".into(),
             FieldSchema {
                 field_type: "string".into(),
-                enum_values: vec![
-                    Value::String("movie".into()),
-                    Value::String("book".into()),
-                ],
+                enum_values: vec![Value::String("movie".into()), Value::String("book".into())],
                 min: None,
                 max: None,
                 default: None,
@@ -2032,8 +2026,10 @@ mod tests {
 
         assert!(report.changes.is_empty(), "no write should be reported");
         assert!(
-            report.errors.iter().any(|e| e.message.contains("year")
-                && e.message.contains("integer")),
+            report
+                .errors
+                .iter()
+                .any(|e| e.message.contains("year") && e.message.contains("integer")),
             "expected year/integer type-mismatch error, got: {:?}",
             report.errors
         );
@@ -2067,8 +2063,10 @@ mod tests {
 
         assert!(report.changes.is_empty());
         assert!(
-            report.errors.iter().any(|e| e.message.contains("status")
-                && e.message.contains("watching")),
+            report
+                .errors
+                .iter()
+                .any(|e| e.message.contains("status") && e.message.contains("watching")),
             "expected status enum violation, got: {:?}",
             report.errors
         );
@@ -2181,12 +2179,16 @@ mod tests {
         assert!(report.changes[0].path.ends_with("Good.md"));
         assert!(report.errors.iter().any(|e| e.path.ends_with("Bad.md")));
         // Disk: Good updated, Bad untouched.
-        assert!(fs::read_to_string(dir.path().join("Notes/movie/Good.md"))
-            .unwrap()
-            .contains("year: 2022"));
-        assert!(fs::read_to_string(dir.path().join("Notes/movie/Bad.md"))
-            .unwrap()
-            .contains("year: 2021"));
+        assert!(
+            fs::read_to_string(dir.path().join("Notes/movie/Good.md"))
+                .unwrap()
+                .contains("year: 2022")
+        );
+        assert!(
+            fs::read_to_string(dir.path().join("Notes/movie/Bad.md"))
+                .unwrap()
+                .contains("year: 2021")
+        );
     }
 
     #[test]
@@ -2239,8 +2241,10 @@ mod tests {
             .execute(&vault)
             .unwrap();
         assert!(
-            report.errors.iter().any(|e| e.message.contains("year")
-                && e.message.contains("integer")),
+            report
+                .errors
+                .iter()
+                .any(|e| e.message.contains("year") && e.message.contains("integer")),
             "expected year/integer type error, got: {:?}",
             report.errors
         );
