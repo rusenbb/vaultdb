@@ -15,7 +15,7 @@
 
 use std::marker::PhantomData;
 
-use vaultdb_core::schema::{self, CollectionSchema};
+use vaultdb_core::schema::{self, CollectionSchema, VaultSchema};
 use vaultdb_core::{CreateBuilder as CoreCreateBuilder, MutationReport, Value, Vault};
 
 use crate::error::Result;
@@ -42,13 +42,16 @@ impl<'v, T: Note> Create<'v, T> {
     /// `schema::load_schema` themselves at startup.
     pub fn new(vault: &'v Vault, name: impl Into<String>) -> Self {
         let mut builder = CoreCreateBuilder::new(T::FOLDER, name);
-        if let Some(collection_name) = T::collection() {
+        // Auto-attach the whole vault schema when this model opts in
+        // via `T::collection()`. Multi-collection enforcement (catch-
+        // alls, ancestor folders) kicks in automatically — picking the
+        // right collections per record is now the core builder's job.
+        if T::collection().is_some() {
             let path = schema::schema_path(&vault.root);
             if path.is_file()
                 && let Ok(s) = schema::load_schema(&path)
-                && let Some(c) = s.collections.get(collection_name)
             {
-                builder = builder.with_schema(c.clone());
+                builder = builder.with_vault_schema(s);
             }
         }
         Self {
@@ -79,11 +82,21 @@ impl<'v, T: Note> Create<'v, T> {
         self
     }
 
-    /// Attach the collection schema for this folder. When set:
-    /// `default:` / `default_expr:` fields auto-fill anything not
-    /// supplied, and `required:` is enforced before writing.
+    /// Attach a single collection schema. Convenience wrapper that
+    /// builds a one-collection `VaultSchema` internally. Use
+    /// [`Self::with_vault_schema`] when you want every applicable
+    /// collection (catch-alls, ancestor folders) to participate.
     pub fn with_schema(mut self, schema: CollectionSchema) -> Self {
         self.inner = self.inner.with_schema(schema);
+        self
+    }
+
+    /// Attach the vault-wide schema. Every applicable collection
+    /// (folder ancestor + filter match) layers its defaults and
+    /// validates the post-state. Overrides any prior
+    /// `with_schema` / `with_vault_schema` call on this builder.
+    pub fn with_vault_schema(mut self, schema: VaultSchema) -> Self {
+        self.inner = self.inner.with_vault_schema(schema);
         self
     }
 

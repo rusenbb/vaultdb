@@ -52,6 +52,7 @@ pub struct UpdateBuilder {
     unset_fields: Vec<String>,
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
+    vault_schema: Option<crate::schema::VaultSchema>,
     write_options: writer::WriteOptions,
 }
 
@@ -64,6 +65,7 @@ impl UpdateBuilder {
             unset_fields: Vec::new(),
             add_tags: Vec::new(),
             remove_tags: Vec::new(),
+            vault_schema: None,
             write_options: writer::WriteOptions::default(),
         }
     }
@@ -85,6 +87,19 @@ impl UpdateBuilder {
 
     pub fn remove_tag(mut self, tag: impl Into<String>) -> Self {
         self.remove_tags.push(tag.into());
+        self
+    }
+
+    /// Attach the vault-wide schema. When set, every matched record's
+    /// **post-update** field map is validated against all applicable
+    /// collections (folder ancestor + filter match) before the writer
+    /// runs. A record whose projected state would violate any
+    /// applicable collection is reported as a `MutationError` and
+    /// skipped — the rest of the batch still proceeds. Strict mode:
+    /// the whole projected record must validate, so pre-existing
+    /// violations surface on the first update touching the record.
+    pub fn with_vault_schema(mut self, schema: crate::schema::VaultSchema) -> Self {
+        self.vault_schema = Some(schema);
         self
     }
 
@@ -146,6 +161,52 @@ impl UpdateBuilder {
             if !crate::filter::evaluate_expr(&self.filter, record, &vault.root, link_index.as_ref())
             {
                 continue;
+            }
+
+            // Strict schema check, if attached. Projects the mutation
+            // onto a typed copy of the record's fields and validates
+            // the post-update state against every applicable
+            // collection. Violations are reported per-record; the
+            // record is skipped (no writes for it) but the batch
+            // continues.
+            if let Some(vault_schema) = &self.vault_schema {
+                let projected_fields = self.project_fields(&record.fields);
+                let projected_record = crate::record::Record {
+                    path: record.path.clone(),
+                    fields: projected_fields.clone(),
+                    raw_content: record.raw_content.clone(),
+                };
+                let applicable = match vault_schema.applicable_collections(
+                    &self.folder,
+                    &projected_record,
+                    &vault.root,
+                ) {
+                    Ok(cols) => cols,
+                    Err(e) => {
+                        errors.push(MutationError {
+                            path: record.path.clone(),
+                            message: format!("evaluating schema applicability: {}", e),
+                        });
+                        continue;
+                    }
+                };
+                let mut seen = std::collections::BTreeSet::<(String, String)>::new();
+                let mut had_violation = false;
+                let filename = record.virtual_name();
+                for col in &applicable {
+                    for v in crate::schema::validate_record(&filename, &projected_fields, col) {
+                        if seen.insert((v.field.clone(), v.message.clone())) {
+                            errors.push(MutationError {
+                                path: record.path.clone(),
+                                message: format!("schema: {} — {}", v.field, v.message),
+                            });
+                            had_violation = true;
+                        }
+                    }
+                }
+                if had_violation {
+                    continue;
+                }
             }
 
             // `load_records_with_content` (called above) guarantees raw_content
@@ -230,6 +291,45 @@ impl UpdateBuilder {
         }
 
         Ok((MutationReport { changes, errors }, writes))
+    }
+
+    /// Produce the typed post-update field map for a single record,
+    /// in the same order writer ops will eventually apply: set first
+    /// (replaces / inserts), then unset, then add_tag, then remove_tag.
+    /// Tag ops mutate the `tags` field as `Value::List<Value::String>`
+    /// — duplicates are preserved (matching writer::add_tag, which
+    /// doesn't dedup) and a missing tag on remove is silently skipped
+    /// (the writer itself will surface that error at write time).
+    fn project_fields(
+        &self,
+        original: &std::collections::BTreeMap<String, Value>,
+    ) -> std::collections::BTreeMap<String, Value> {
+        let mut fields = original.clone();
+        for (k, v) in &self.set_fields {
+            fields.insert(k.clone(), v.clone());
+        }
+        for k in &self.unset_fields {
+            fields.remove(k);
+        }
+        if !self.add_tags.is_empty() || !self.remove_tags.is_empty() {
+            let mut tags_list: Vec<Value> = match fields.get("tags") {
+                Some(Value::List(l)) => l.clone(),
+                _ => Vec::new(),
+            };
+            for t in &self.add_tags {
+                tags_list.push(Value::String(t.clone()));
+            }
+            for t in &self.remove_tags {
+                if let Some(idx) = tags_list
+                    .iter()
+                    .position(|v| matches!(v, Value::String(s) if s == t))
+                {
+                    tags_list.remove(idx);
+                }
+            }
+            fields.insert("tags".to_string(), Value::List(tags_list));
+        }
+        fields
     }
 }
 
@@ -739,7 +839,7 @@ pub struct CreateBuilder {
     name: String,
     template: Option<String>,
     set_fields: Vec<(String, Value)>,
-    schema: Option<crate::schema::CollectionSchema>,
+    vault_schema: Option<crate::schema::VaultSchema>,
     write_options: writer::WriteOptions,
 }
 
@@ -750,7 +850,7 @@ impl CreateBuilder {
             name: name.into(),
             template: None,
             set_fields: Vec::new(),
-            schema: None,
+            vault_schema: None,
             write_options: writer::WriteOptions::default(),
         }
     }
@@ -770,12 +870,28 @@ impl CreateBuilder {
         self
     }
 
-    /// Attach the collection schema for this folder. When set:
-    /// `default:` / `default_expr:` fields are applied for any field
-    /// the user didn't supply, and `required:` is enforced before
-    /// writing.
-    pub fn with_schema(mut self, schema: crate::schema::CollectionSchema) -> Self {
-        self.schema = Some(schema);
+    /// Attach a single collection schema. Convenience wrapper that
+    /// builds a one-collection [`VaultSchema`] and forwards to
+    /// [`Self::with_vault_schema`]. The compute path is identical —
+    /// `applicable_collections` will pick this collection iff its
+    /// `folder` is `==` or ancestor of the builder's target folder
+    /// and the filter (if any) matches the projected record.
+    pub fn with_schema(self, schema: crate::schema::CollectionSchema) -> Self {
+        let mut vs = crate::schema::VaultSchema {
+            collections: std::collections::BTreeMap::new(),
+        };
+        vs.collections.insert("__single__".to_string(), schema);
+        self.with_vault_schema(vs)
+    }
+
+    /// Attach the vault-wide schema. Every collection whose folder
+    /// covers (`==` or is an ancestor of) the builder's target folder
+    /// AND whose `filter:` matches the projected record contributes:
+    /// its `default:` / `default_expr:` fields layer in shallowest-
+    /// folder first (deeper folders override), and the post-defaults
+    /// record must satisfy *all* applicable collections — strict mode.
+    pub fn with_vault_schema(mut self, schema: crate::schema::VaultSchema) -> Self {
+        self.vault_schema = Some(schema);
         self
     }
 
@@ -818,7 +934,12 @@ impl CreateBuilder {
                 {
                     std::fs::create_dir_all(parent).map_err(VaultdbError::Io)?;
                 }
-                writer::atomic_write_with(&w.path, &w.modified_content, self.write_options)
+                // `atomic_create_with` (not `atomic_write_with`) so that
+                // an external writer racing in between compute()'s
+                // `dest.exists()` check and the rename can't be silently
+                // overwritten — the rename refuses if the target now
+                // exists, surfacing as an Io error rather than a clobber.
+                writer::atomic_create_with(&w.path, &w.modified_content, self.write_options)
                     .map_err(VaultdbError::Io)?;
             }
             Ok(report)
@@ -872,37 +993,75 @@ impl CreateBuilder {
             fields.insert(k.clone(), v.clone());
         }
 
-        // 3. Schema defaults (only for unset fields).
-        if let Some(schema) = &self.schema {
-            for (name, fs) in &schema.fields {
-                if fields.contains_key(name) {
-                    continue;
+        // 3. Schema enforcement — defaults + full record validation
+        //    against every applicable collection. Applicability is
+        //    decided ONCE from the post-(template+set) field map: if a
+        //    later default would have triggered a different collection
+        //    to apply, that's a degenerate schema design and we don't
+        //    chase it.
+        if let Some(vault_schema) = &self.vault_schema {
+            let projected = crate::record::Record {
+                path: dest.clone(),
+                fields: fields.clone(),
+                raw_content: None,
+            };
+            let applicable = match vault_schema.applicable_collections(
+                &self.folder,
+                &projected,
+                &vault.root,
+            ) {
+                Ok(cols) => cols,
+                Err(e) => {
+                    errors.push(MutationError {
+                        path: dest.clone(),
+                        message: format!("evaluating schema applicability: {}", e),
+                    });
+                    return Ok((MutationReport { changes, errors }, None));
                 }
-                if let Some(default) = &fs.default {
-                    fields.insert(name.clone(), default.clone());
-                } else if let Some(expr) = &fs.default_expr {
-                    match crate::schema::resolve_default_expr(expr) {
-                        Ok(v) => {
-                            fields.insert(name.clone(), v);
-                        }
-                        Err(e) => {
-                            errors.push(MutationError {
-                                path: dest.clone(),
-                                message: format!("resolving default_expr for '{}': {}", name, e),
-                            });
+            };
+
+            // Layer defaults. `applicable_collections` sorts shallowest-
+            // folder first, so deeper folders naturally overwrite when
+            // we iterate forwards.
+            for col in &applicable {
+                for (fname, fs) in &col.fields {
+                    if fields.contains_key(fname) {
+                        continue;
+                    }
+                    if let Some(default) = &fs.default {
+                        fields.insert(fname.clone(), default.clone());
+                    } else if let Some(expr) = &fs.default_expr {
+                        match crate::schema::resolve_default_expr(expr) {
+                            Ok(v) => {
+                                fields.insert(fname.clone(), v);
+                            }
+                            Err(e) => {
+                                errors.push(MutationError {
+                                    path: dest.clone(),
+                                    message: format!(
+                                        "resolving default_expr for '{}': {}",
+                                        fname, e
+                                    ),
+                                });
+                            }
                         }
                     }
                 }
             }
 
-            // 4. Required-field check, AFTER defaults have been applied.
-            for req in &schema.required {
-                let satisfied = matches!(fields.get(req), Some(v) if !matches!(v, Value::Null));
-                if !satisfied {
-                    errors.push(MutationError {
-                        path: dest.clone(),
-                        message: format!("required field missing: '{}'", req),
-                    });
+            // Validate post-default fields against every applicable
+            // collection. Dedup (field, message) so the catch-all and a
+            // sub-collection don't both report the same missing field
+            // twice.
+            let mut seen = std::collections::BTreeSet::<(String, String)>::new();
+            for col in &applicable {
+                for v in crate::schema::validate_record(&filename, &fields, col) {
+                    if seen.insert((v.field.clone(), v.message.clone())) {
+                        errors.push(MutationError {
+                            path: dest.clone(),
+                            message: format!("schema: {} — {}", v.field, v.message),
+                        });
+                    }
                 }
             }
         }
@@ -1787,5 +1946,322 @@ mod tests {
         assert!(content.contains("year: 2021"));
         // Body preserved.
         assert!(content.contains("Review goes here"));
+    }
+
+    // ── Strict-schema enforcement (CreateBuilder + UpdateBuilder) ─────────
+    //
+    // Cover the multi-collection scenarios the real-world schema
+    // exercises (a catch-all whose folder is an ancestor of a more
+    // specific collection, the specific collection's filter using a
+    // field value to opt-in). Builds an in-code VaultSchema fixture
+    // rather than going through serde_yaml.
+
+    use crate::schema::VaultSchema;
+
+    fn vault_schema_movies() -> VaultSchema {
+        // Wraps movie_schema as a single-collection VaultSchema —
+        // exercises the same code path with_schema goes through.
+        let mut vs = VaultSchema {
+            collections: std::collections::BTreeMap::new(),
+        };
+        vs.collections.insert("movies".into(), movie_schema());
+        vs
+    }
+
+    fn vault_schema_catchall_and_movies() -> VaultSchema {
+        // Mirrors the real-vault shape: `Notes` catch-all (folder is
+        // an ancestor of every subcollection, no filter) + `movies`
+        // (folder Notes/movie, filter db-table = movie).
+        let mut collections = std::collections::BTreeMap::new();
+
+        let mut catchall_fields = std::collections::BTreeMap::new();
+        catchall_fields.insert(
+            "db-table".into(),
+            FieldSchema {
+                field_type: "string".into(),
+                enum_values: vec![
+                    Value::String("movie".into()),
+                    Value::String("book".into()),
+                ],
+                min: None,
+                max: None,
+                default: None,
+                default_expr: None,
+            },
+        );
+        collections.insert(
+            "Notes".into(),
+            CollectionSchema {
+                description: None,
+                folder: "Notes".into(),
+                filter: vec![],
+                required: vec!["db-table".into()],
+                fields: catchall_fields,
+            },
+        );
+        collections.insert("movies".into(), {
+            let mut m = movie_schema();
+            m.filter = vec!["db-table = movie".into()];
+            m
+        });
+
+        VaultSchema { collections }
+    }
+
+    #[test]
+    fn update_rejects_type_mismatch() {
+        use std::fs;
+        let dir = vault_with_obsidian();
+        fs::create_dir_all(dir.path().join("Notes/movie")).unwrap();
+        fs::write(
+            dir.path().join("Notes/movie/Dune.md"),
+            "---\ndb-table: movie\ndirector: DV\nstatus: to-watch\nyear: 2021\n---\nBody\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(crate::query::Predicate::Equals {
+            field: "director".into(),
+            value: Value::String("DV".into()),
+        });
+        let report = UpdateBuilder::new("Notes/movie", filter)
+            .set("year", Value::String("nope".into()))
+            .with_vault_schema(vault_schema_movies())
+            .execute(&vault)
+            .unwrap();
+
+        assert!(report.changes.is_empty(), "no write should be reported");
+        assert!(
+            report.errors.iter().any(|e| e.message.contains("year")
+                && e.message.contains("integer")),
+            "expected year/integer type-mismatch error, got: {:?}",
+            report.errors
+        );
+        // File on disk is unchanged.
+        let content = fs::read_to_string(dir.path().join("Notes/movie/Dune.md")).unwrap();
+        assert!(content.contains("year: 2021"));
+        assert!(!content.contains("year: nope"));
+    }
+
+    #[test]
+    fn update_rejects_enum_violation() {
+        use std::fs;
+        let dir = vault_with_obsidian();
+        fs::create_dir_all(dir.path().join("Notes/movie")).unwrap();
+        fs::write(
+            dir.path().join("Notes/movie/Dune.md"),
+            "---\ndb-table: movie\ndirector: DV\nstatus: to-watch\nyear: 2021\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(crate::query::Predicate::Equals {
+            field: "director".into(),
+            value: Value::String("DV".into()),
+        });
+        let report = UpdateBuilder::new("Notes/movie", filter)
+            .set("status", Value::String("watching".into()))
+            .with_vault_schema(vault_schema_movies())
+            .execute(&vault)
+            .unwrap();
+
+        assert!(report.changes.is_empty());
+        assert!(
+            report.errors.iter().any(|e| e.message.contains("status")
+                && e.message.contains("watching")),
+            "expected status enum violation, got: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn update_passes_when_unconstrained_field_changes() {
+        // Schema doesn't declare `notes-to-self`; setting it should be
+        // allowed without complaint. The other required/typed fields
+        // must already be valid for the post-state to pass strict mode.
+        use std::fs;
+        let dir = vault_with_obsidian();
+        fs::create_dir_all(dir.path().join("Notes/movie")).unwrap();
+        fs::write(
+            dir.path().join("Notes/movie/Dune.md"),
+            "---\ndb-table: movie\ndirector: DV\nstatus: to-watch\nyear: 2021\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(crate::query::Predicate::Equals {
+            field: "director".into(),
+            value: Value::String("DV".into()),
+        });
+        let report = UpdateBuilder::new("Notes/movie", filter)
+            .set("notes-to-self", Value::String("rewatch".into()))
+            .with_vault_schema(vault_schema_movies())
+            .execute(&vault)
+            .unwrap();
+        assert!(
+            report.errors.is_empty(),
+            "no errors expected, got: {:?}",
+            report.errors
+        );
+        assert_eq!(report.changes.len(), 1);
+        let content = fs::read_to_string(dir.path().join("Notes/movie/Dune.md")).unwrap();
+        assert!(content.contains("notes-to-self: rewatch"));
+    }
+
+    #[test]
+    fn update_surfaces_preexisting_violation() {
+        // Strict mode (chosen explicitly): a file already missing a
+        // required field is unwritable through vaultdb until the field
+        // is supplied — even if the user's update touches a totally
+        // unrelated field.
+        use std::fs;
+        let dir = vault_with_obsidian();
+        fs::create_dir_all(dir.path().join("Notes/movie")).unwrap();
+        fs::write(
+            dir.path().join("Notes/movie/Old.md"),
+            // Note: no `director`, which movies.required demands.
+            "---\ndb-table: movie\nstatus: to-watch\nyear: 2021\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(crate::query::Predicate::Equals {
+            field: "db-table".into(),
+            value: Value::String("movie".into()),
+        });
+        let report = UpdateBuilder::new("Notes/movie", filter)
+            .set("year", Value::Integer(2022))
+            .with_vault_schema(vault_schema_movies())
+            .execute(&vault)
+            .unwrap();
+        assert!(
+            report.errors.iter().any(|e| e.message.contains("director")),
+            "expected pre-existing required-field violation, got: {:?}",
+            report.errors
+        );
+        // File untouched.
+        let content = fs::read_to_string(dir.path().join("Notes/movie/Old.md")).unwrap();
+        assert!(content.contains("year: 2021"));
+    }
+
+    #[test]
+    fn update_skips_one_blocks_one_in_batch() {
+        // Two matched records: one update is valid (year change within
+        // range), the other (also matched) wasn't even attempted but
+        // demonstrates per-record isolation by being in a separate test
+        // alongside. Real per-record skip-vs-write batching covered by
+        // this scenario: matched records both processed; valid one
+        // writes, invalid one errors.
+        use std::fs;
+        let dir = vault_with_obsidian();
+        fs::create_dir_all(dir.path().join("Notes/movie")).unwrap();
+        fs::write(
+            dir.path().join("Notes/movie/Good.md"),
+            "---\ndb-table: movie\ndirector: A\nstatus: to-watch\nyear: 2021\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("Notes/movie/Bad.md"),
+            // Missing director — pre-existing violation surfaces on update.
+            "---\ndb-table: movie\nstatus: to-watch\nyear: 2021\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(crate::query::Predicate::Equals {
+            field: "db-table".into(),
+            value: Value::String("movie".into()),
+        });
+        let report = UpdateBuilder::new("Notes/movie", filter)
+            .set("year", Value::Integer(2022))
+            .with_vault_schema(vault_schema_movies())
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(report.changes.len(), 1, "exactly one record should write");
+        assert!(report.changes[0].path.ends_with("Good.md"));
+        assert!(report.errors.iter().any(|e| e.path.ends_with("Bad.md")));
+        // Disk: Good updated, Bad untouched.
+        assert!(fs::read_to_string(dir.path().join("Notes/movie/Good.md"))
+            .unwrap()
+            .contains("year: 2022"));
+        assert!(fs::read_to_string(dir.path().join("Notes/movie/Bad.md"))
+            .unwrap()
+            .contains("year: 2021"));
+    }
+
+    #[test]
+    fn update_validates_against_catchall_and_subfolder() {
+        // The `Notes` catch-all requires `db-table`; `movies`
+        // additionally requires director, year. A movie record at
+        // Notes/movie/ activates BOTH. Unsetting db-table fails the
+        // catch-all; the test confirms the catch-all is actually
+        // evaluated for sub-folder records.
+        use std::fs;
+        let dir = vault_with_obsidian();
+        fs::create_dir_all(dir.path().join("Notes/movie")).unwrap();
+        fs::write(
+            dir.path().join("Notes/movie/Dune.md"),
+            "---\ndb-table: movie\ndirector: DV\nstatus: to-watch\nyear: 2021\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(crate::query::Predicate::Equals {
+            field: "director".into(),
+            value: Value::String("DV".into()),
+        });
+        let report = UpdateBuilder::new("Notes/movie", filter)
+            .unset("db-table")
+            .with_vault_schema(vault_schema_catchall_and_movies())
+            .execute(&vault)
+            .unwrap();
+
+        // db-table being unset removes the `movies` filter match too,
+        // so only the catch-all still applies — and the catch-all
+        // requires db-table. So we get a required-field error from the
+        // catch-all (proving it was evaluated).
+        assert!(report.changes.is_empty());
+        assert!(
+            report.errors.iter().any(|e| e.message.contains("db-table")),
+            "expected db-table missing error from catch-all, got: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn create_rejects_type_mismatch() {
+        let dir = vault_with_obsidian();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let report = CreateBuilder::new("Notes/movie", "Dune")
+            .with_vault_schema(vault_schema_movies())
+            .set("director", Value::String("DV".into()))
+            .set("year", Value::String("not-a-year".into()))
+            .execute(&vault)
+            .unwrap();
+        assert!(
+            report.errors.iter().any(|e| e.message.contains("year")
+                && e.message.contains("integer")),
+            "expected year/integer type error, got: {:?}",
+            report.errors
+        );
+        assert!(!dir.path().join("Notes/movie/Dune.md").exists());
+    }
+
+    #[test]
+    fn create_validates_against_multiple_applicable_collections() {
+        // Creating a movie note: both `Notes` catch-all and `movies`
+        // apply. Required: db-table (both), director + year (movies).
+        // Set only db-table → catch-all passes, movies fails on
+        // missing director + year.
+        let dir = vault_with_obsidian();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        let report = CreateBuilder::new("Notes/movie", "X")
+            .with_vault_schema(vault_schema_catchall_and_movies())
+            .set("db-table", Value::String("movie".into()))
+            .execute(&vault)
+            .unwrap();
+        assert!(report.errors.iter().any(|e| e.message.contains("director")));
+        assert!(report.errors.iter().any(|e| e.message.contains("year")));
+        assert!(!dir.path().join("Notes/movie/X.md").exists());
     }
 }

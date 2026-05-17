@@ -33,17 +33,16 @@ pub fn run_create(
         builder = builder.set(field.trim(), Value::parse_scalar(value.trim()));
     }
 
-    // Schema is best-effort: if the file doesn't exist, no defaults / required
-    // checks apply (today's behaviour). If it exists, we honour the exact-match
-    // collection — prefix matches don't apply because `create` targets a
-    // specific folder.
+    // Schema enforcement: when the file exists we attach the full
+    // vault schema so every applicable collection (folder ancestors +
+    // filter matches) participates — defaults layered, post-state
+    // strictly validated. A malformed schema file is a hard error
+    // rather than a silent downgrade to "no schema."
     let schema_path = schema::schema_path(&vault.root);
     if schema_path.is_file() {
         let vault_schema: VaultSchema = schema::load_schema(&schema_path)
             .context(format!("loading {}", schema_path.display()))?;
-        if let Some(collection) = vault_schema.collection_for_folder(folder) {
-            builder = builder.with_schema(collection.clone());
-        }
+        builder = builder.with_vault_schema(vault_schema);
     }
 
     if dry_run {

@@ -5,6 +5,135 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] — Strict whole-record schema enforcement on every write
+
+The headline: if a `vaultdb-schema.yaml` exists, every create and
+update validates the post-state of the record against **all
+applicable collections** before writing. A note must satisfy a
+catch-all *and* its specific collection simultaneously. Updates that
+would leave the record in a violating state are blocked — including
+pre-existing violations on unrelated fields. There is no
+escape-hatch flag; repair is by direct `.md` edit.
+
+### Added — `vaultdb-core::schema`
+
+- `VaultSchema::applicable_collections(record_folder, projected,
+  vault_root)` — picks every collection whose `folder` is `==` or an
+  ancestor of `record_folder` AND whose `filter:` evaluates true
+  against the projected record. Returns shallowest-folder first, so
+  callers that layer defaults in iteration order get
+  "deepest folder wins" for free.
+- `validate_schema_consistency(schema)` — pairwise cross-collection
+  checks run at schema load time. Catches:
+  - **Tier 1, type conflict:** two folder-overlapping collections
+    declaring the same field with different `type:` strings.
+  - **Tier 1, default vs sibling:** a `default:` (or resolved
+    `default_expr:`) that satisfies its own collection but violates
+    a different overlapping collection's declaration of the same
+    field — would silently break creates the moment the default
+    fires.
+  - **Tier 2, disjoint enums:** both collections declare non-empty
+    `enum_values:` whose intersection is empty. Subset narrowing
+    (e.g. `Notes.db-table = [movie, book, ...]` and
+    `movies.db-table = [movie]`) stays allowed — it's the documented
+    pattern.
+  - **Tier 2, disjoint numeric ranges:** intersected `min`/`max` is
+    empty.
+- `filters_demonstrably_disjoint(a, b)` — skips the cross-checks
+  above when the two collections' filters are mutually exclusive
+  equality predicates on the same field (e.g.
+  `db-table = movie` vs `db-table = book`), which is the pattern the
+  schema uses to make sibling sub-collections never co-apply to a
+  single record.
+- `load_schema` now runs `validate_schema_consistency` after
+  `validate_schema_defaults`, so a self-inconsistent schema fails
+  fast instead of producing silent-broken writes later.
+
+### Added — builder API
+
+- **`CreateBuilder::with_vault_schema(VaultSchema)`** —
+  attach the vault-wide schema instead of a single
+  `CollectionSchema`. Inside `compute()` the builder picks
+  applicable collections from a synthetic record built from
+  post-template + post-set fields, layers defaults from each in
+  shallowest-first order, then validates the final field map
+  against *every* applicable collection. Violations are
+  deduplicated on `(field, message)` so a catch-all and a
+  sub-collection don't double-report the same missing required
+  field.
+- **`CreateBuilder::with_schema(CollectionSchema)`** retained as a
+  back-compat shim — wraps a single collection in a one-entry
+  `VaultSchema` and routes through the same code path.
+- **`UpdateBuilder::with_vault_schema(VaultSchema)`** — new. The
+  builder projects set/unset/add_tag/remove_tag onto a typed copy
+  of `record.fields`, picks applicable collections against the
+  projected record, and validates against each. Per-record batch
+  isolation is preserved: a record whose projection violates is
+  reported as a `MutationError` and skipped; the rest of the batch
+  still writes.
+
+### Changed — caller wiring
+
+- **CLI** `create` and `update` commands attach the full vault
+  schema (via `with_vault_schema`) whenever
+  `<vault>/vaultdb-schema.yaml` exists. A malformed schema is a
+  hard error rather than silently downgrading to no-enforcement.
+- **MCP** `build_create` / `build_update` (and their `plan_*` /
+  `execute_*` callers) attach via a new shared helper
+  `load_vault_schema_opt(vault)`. `plan_update` now takes `&Vault`
+  so it can load the schema.
+- **ORM** `Create<T>::new` and `Update<T>::new` auto-attach the
+  vault schema when the model declares `Note::collection()`. The
+  ORM previously looked up one named collection by `T::collection()`
+  and called `with_schema`; now it loads the whole schema so the
+  catch-all and any other applicable collections also enforce.
+  `Update<T>` gains a `with_vault_schema(...)` setter that mirrors
+  `Create<T>`'s.
+
+### Changed — write hardening
+
+- **`atomic_create_with(path, content, opts)`** — new in
+  `writer`. Same tempfile+rename pattern as `atomic_write_with`,
+  but uses `persist_noclobber` so the rename refuses if the target
+  already exists. `CreateBuilder::execute` switches to this
+  variant, closing the TOCTOU window between the compute-time
+  `dest.exists()` check and the rename — an external writer
+  (Obsidian, vim, another tool that doesn't honour the vault lock)
+  racing in cannot be silently clobbered.
+
+### Tests
+
+- `mutation::tests` gains 8 strict-enforcement cases:
+  `update_rejects_type_mismatch`, `update_rejects_enum_violation`,
+  `update_passes_when_unconstrained_field_changes`,
+  `update_surfaces_preexisting_violation`,
+  `update_skips_one_blocks_one_in_batch`,
+  `update_validates_against_catchall_and_subfolder`,
+  `create_rejects_type_mismatch`,
+  `create_validates_against_multiple_applicable_collections`.
+- `schema::tests` gains 8 consistency cases covering each Tier 1 /
+  Tier 2 rule, the enum-narrowing positive case, the
+  default-compatible-with-overlap positive case, and the
+  filter-disjoint skip case modelled on the real-world `indexes` vs
+  `archive` pair.
+- `writer::tests::atomic_create_*` (2 new): refusal on existing
+  target, success on new path.
+
+### Migration notes
+
+- Callers using `CreateBuilder::with_schema(CollectionSchema)`
+  continue to work unchanged. The behaviour they observe gets
+  stricter: any `type:` / `enum:` / `min`/`max` violation in the
+  post-set field map now blocks the write, where 1.2.1 only
+  enforced `required:`. If you were relying on permissive mode,
+  surface a `MutationError` to the user rather than working around
+  it — there is no flag to opt out.
+- Schema files that contain genuine cross-collection contradictions
+  (e.g. same field, disjoint enums on folders that overlap and
+  filters that don't separate them) now fail to load. Fix the
+  schema; `load_schema` returns a `SchemaError` naming the
+  collections and the field.
+
 ## [1.2.1] — Typed list/map writes round-trip as block-style YAML
 
 ### Fixed

@@ -633,6 +633,46 @@ pub fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()
     atomic_write_with(path, content, WriteOptions::default())
 }
 
+/// Atomically create a new file at `path` with `content`. **Refuses to
+/// overwrite** if `path` already exists — returns
+/// `io::ErrorKind::AlreadyExists`. Used by `CreateBuilder::execute` as
+/// defence-in-depth against a TOCTOU window between its `dest.exists()`
+/// check and the rename: even if an external process slips a file into
+/// the destination after the check, this won't clobber it.
+///
+/// Same atomic tempfile+rename pattern as [`atomic_write_with`]; the
+/// only difference is `persist_noclobber` in place of `persist`, which
+/// maps to `link(2)` on POSIX and `MoveFileEx` without
+/// `MOVEFILE_REPLACE_EXISTING` on Windows.
+pub fn atomic_create_with(
+    path: &std::path::Path,
+    content: &str,
+    opts: WriteOptions,
+) -> std::io::Result<()> {
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "atomic_create target has no parent dir: {}",
+            path.display()
+        ))
+    })?;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    use std::io::Write;
+    tmp.write_all(content.as_bytes())?;
+    tmp.flush()?;
+
+    if opts.fsync {
+        tmp.as_file().sync_all()?;
+    }
+
+    tmp.persist_noclobber(path).map_err(|e| e.error)?;
+
+    if opts.fsync {
+        fsync_dir(dir)?;
+    }
+    Ok(())
+}
+
 /// Atomically replace the contents of `path` with `content`, honoring
 /// [`WriteOptions`].
 ///
@@ -1015,5 +1055,33 @@ Body text.
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("flow-style"));
+    }
+
+    #[test]
+    fn atomic_create_refuses_to_overwrite_existing_file() {
+        // Defence-in-depth: even if a CreateBuilder's compute-time
+        // `dest.exists()` check passed (or was bypassed), the
+        // create-with-no-clobber write must still refuse to silently
+        // overwrite a file that appeared in the gap.
+        use std::fs;
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("note.md");
+        fs::write(&target, "existing content\n").unwrap();
+
+        let err = atomic_create_with(&target, "would clobber\n", WriteOptions::default())
+            .expect_err("atomic_create must refuse to overwrite");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+        // Original file content is intact.
+        assert_eq!(fs::read_to_string(&target).unwrap(), "existing content\n");
+    }
+
+    #[test]
+    fn atomic_create_writes_to_new_path() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("fresh.md");
+        atomic_create_with(&target, "hello\n", WriteOptions::default()).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello\n");
     }
 }

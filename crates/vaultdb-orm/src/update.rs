@@ -12,6 +12,7 @@
 
 use std::marker::PhantomData;
 
+use vaultdb_core::schema::{self, VaultSchema};
 use vaultdb_core::{Expr, MutationReport, UpdateBuilder as CoreUpdateBuilder, Value, Vault};
 
 use crate::error::Result;
@@ -27,11 +28,31 @@ pub struct Update<'v, T: Note> {
 impl<'v, T: Note> Update<'v, T> {
     /// Internal constructor. Use [`crate::Query::update`].
     pub(crate) fn new(vault: &'v Vault, filter: Expr) -> Self {
+        let mut inner = CoreUpdateBuilder::new(T::FOLDER, filter);
+        // Auto-attach the vault schema when this model opts in via
+        // `T::collection()`. Mirrors `Create::new` so strict-write
+        // enforcement is consistent across the typed surface.
+        if T::collection().is_some() {
+            let path = schema::schema_path(&vault.root);
+            if path.is_file()
+                && let Ok(s) = schema::load_schema(&path)
+            {
+                inner = inner.with_vault_schema(s);
+            }
+        }
         Self {
             vault,
-            inner: CoreUpdateBuilder::new(T::FOLDER, filter),
+            inner,
             _marker: PhantomData,
         }
+    }
+
+    /// Attach the vault-wide schema explicitly. Overrides whatever
+    /// auto-attach happened in [`Self::new`] (or attaches when the
+    /// model declined the auto-resolve gate).
+    pub fn with_vault_schema(mut self, schema: VaultSchema) -> Self {
+        self.inner = self.inner.with_vault_schema(schema);
+        self
     }
 
     /// Set `field` to `value` for every matching record.

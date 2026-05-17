@@ -49,6 +49,69 @@ impl VaultSchema {
     pub fn collection_for_folder<'a>(&'a self, folder: &str) -> Option<&'a CollectionSchema> {
         self.collections.values().find(|c| c.folder == folder)
     }
+
+    /// Every collection that *applies to a record* at `record_folder`
+    /// carrying the given fields.
+    ///
+    /// A collection applies when:
+    /// - its `folder` is `==` `record_folder` or an ancestor of it
+    ///   (`"Notes"` is an ancestor of `"Notes/movie"`); AND
+    /// - every parsed `filter:` expression evaluates true against the
+    ///   projected record. Filter parsing failures abort with
+    ///   `SchemaError` — we'd rather block a write than silently treat a
+    ///   broken filter as "no filter."
+    ///
+    /// Unlike `collections_for_folder`, this picks *ancestors*, not
+    /// descendants — given a record, "which collections govern me?"
+    /// rather than "which collections live under this folder?".
+    pub fn applicable_collections<'a>(
+        &'a self,
+        record_folder: &str,
+        projected: &crate::record::Record,
+        vault_root: &Path,
+    ) -> Result<Vec<&'a CollectionSchema>> {
+        let mut out = Vec::new();
+        for c in self.collections.values() {
+            if !folder_is_ancestor_or_equal(&c.folder, record_folder) {
+                continue;
+            }
+            let mut all_pass = true;
+            for f in &c.filter {
+                let expr = crate::query::Expr::parse(f).map_err(|e| {
+                    VaultdbError::SchemaError(format!(
+                        "parsing filter '{}' on collection with folder '{}': {}",
+                        f, c.folder, e
+                    ))
+                })?;
+                if !crate::filter::evaluate_expr(&expr, projected, vault_root, None) {
+                    all_pass = false;
+                    break;
+                }
+            }
+            if all_pass {
+                out.push(c);
+            }
+        }
+        // Stable order: shallowest folder first, so callers that layer
+        // defaults from this list in iteration order get
+        // deepest-folder-wins for free.
+        out.sort_by_key(|c| c.folder.matches('/').count());
+        Ok(out)
+    }
+}
+
+/// True if `ancestor` equals `child` or is a path-prefix of it
+/// (`"Notes"` is an ancestor of `"Notes/movie"`; `"Note"` is not).
+/// Empty `ancestor` matches everything (root scope).
+fn folder_is_ancestor_or_equal(ancestor: &str, child: &str) -> bool {
+    if ancestor.is_empty() {
+        return true;
+    }
+    if ancestor == child {
+        return true;
+    }
+    let prefix = format!("{}/", ancestor);
+    child.starts_with(&prefix)
 }
 
 /// Schema for a single collection (a folder + optional filter).
@@ -131,6 +194,7 @@ pub fn load_schema(path: &Path) -> Result<VaultSchema> {
     let parsed: VaultSchema = serde_yaml::from_str(&content)
         .map_err(|e| VaultdbError::SchemaError(format!("parsing {}: {}", path.display(), e)))?;
     validate_schema_defaults(&parsed)?;
+    validate_schema_consistency(&parsed)?;
     Ok(parsed)
 }
 
@@ -212,6 +276,268 @@ fn validate_field_defaults(col: &str, field: &str, schema: &FieldSchema) -> Resu
     }
 
     Ok(())
+}
+
+/// Cross-collection consistency checks. Runs after `validate_schema_defaults`
+/// at schema load. Rejects schemas where two **folder-overlapping**
+/// collections (one folder is `==` or an ancestor of the other) declare
+/// the same field name in mutually unsatisfiable ways:
+///
+/// - **Type conflict (Tier 1):** different `type:` strings. Two
+///   collections that both apply to the same record can't disagree on
+///   the field's type — no value would satisfy both. The check is
+///   strict-equal on the type string; intentional narrowings between
+///   `string` and `wikilink` are not treated as compatible. The user
+///   should redeclare the field consistently.
+/// - **Default vs sibling (Tier 1):** a `default:` (or resolved
+///   `default_expr:`) on field `X` in collection A must satisfy every
+///   *other* folder-overlapping collection that also declares `X`.
+///   Without this check, the moment the default fires on create, the
+///   sibling collection's validator would refuse the write — turning a
+///   silent schema bug into a confusing user-facing error.
+/// - **Disjoint enum (Tier 2):** both have non-empty `enum:` whose
+///   intersection is empty. Narrowing (subset) is allowed and expected
+///   — that's how `Notes.db-table = [movie, book, ...]` works alongside
+///   `movies.db-table = [movie]`. Only fully-disjoint sets fail.
+/// - **Disjoint range (Tier 2):** intersected `min`/`max` is empty
+///   (`max(min_a, min_b) > min(max_a, max_b)`).
+///
+/// Collection-pair overlap is decided by folder alone in v1 — a filter
+/// pair that's *obviously* disjoint (same field, different equality
+/// scalars) could safely skip the field-consistency check, but the
+/// disjointness analysis isn't worth the complexity yet. Conservative
+/// over-checking means at worst a spurious schema-load error, which the
+/// author can resolve by aligning the field declarations.
+pub fn validate_schema_consistency(schema: &VaultSchema) -> Result<()> {
+    let entries: Vec<(&String, &CollectionSchema)> = schema.collections.iter().collect();
+
+    // Pairwise checks for shared-field consistency. Skip pairs whose
+    // filters are demonstrably disjoint: even if their folders overlap
+    // (e.g. one folder is an ancestor of the other), the filters mean
+    // no record can match both, so their field declarations don't have
+    // to align. See `filters_demonstrably_disjoint` for the limits of
+    // what "demonstrably" covers.
+    for i in 0..entries.len() {
+        let (name_a, col_a) = entries[i];
+        for entry_b in entries.iter().skip(i + 1) {
+            let (name_b, col_b) = *entry_b;
+            if !folders_overlap(&col_a.folder, &col_b.folder) {
+                continue;
+            }
+            if filters_demonstrably_disjoint(&col_a.filter, &col_b.filter)? {
+                continue;
+            }
+            for (field_name, fs_a) in &col_a.fields {
+                let Some(fs_b) = col_b.fields.get(field_name) else {
+                    continue;
+                };
+                check_field_pair(name_a, col_a, fs_a, name_b, col_b, fs_b, field_name)?;
+            }
+        }
+    }
+
+    // Defaults must satisfy every other folder-overlapping collection
+    // that declares the same field — unless the two collections'
+    // filters are demonstrably disjoint, in which case the default
+    // never lands in a record governed by the other collection.
+    for (col_name, col) in &schema.collections {
+        for (field_name, fs) in &col.fields {
+            let resolved: Option<Value> = if let Some(d) = &fs.default {
+                Some(d.clone())
+            } else if let Some(e) = &fs.default_expr {
+                resolve_default_expr(e).ok()
+            } else {
+                None
+            };
+            let Some(val) = resolved else {
+                continue;
+            };
+
+            for (other_name, other_col) in &schema.collections {
+                if other_name == col_name {
+                    continue;
+                }
+                if !folders_overlap(&col.folder, &other_col.folder) {
+                    continue;
+                }
+                if filters_demonstrably_disjoint(&col.filter, &other_col.filter)? {
+                    continue;
+                }
+                let Some(other_fs) = other_col.fields.get(field_name) else {
+                    continue;
+                };
+                if let Err(why) = default_satisfies(&val, other_fs) {
+                    return Err(VaultdbError::SchemaError(format!(
+                        "collection '{}': default for field '{}' would violate overlapping \
+                         collection '{}' (folder '{}'): {}",
+                        col_name, field_name, other_name, other_col.folder, why
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Conservative filter-disjointness check used to skip cross-checks
+/// between collections that can never co-apply to a single record.
+///
+/// Returns `true` only when at least one *forced* equality constraint
+/// in `a` contradicts a forced equality constraint in `b` on the same
+/// field — e.g. `db-table = movie` in one and `db-table = book` in
+/// the other. "Forced" means the predicate appears under top-level
+/// `And` chains or directly; predicates nested inside `Or` or `Not`
+/// are skipped because they don't have to hold. Anything fancier (range
+/// constraints, inequality, multi-value membership) is treated as
+/// non-disjoint — the field-consistency check then runs and may fire
+/// a spurious error, which is the trade-off we accept until a real
+/// schema needs the smarter analysis.
+fn filters_demonstrably_disjoint(a: &[String], b: &[String]) -> Result<bool> {
+    let constraints_a = parse_forced_equalities(a)?;
+    let constraints_b = parse_forced_equalities(b)?;
+    for (fa, va) in &constraints_a {
+        for (fb, vb) in &constraints_b {
+            if fa == fb && va != vb {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Parse a collection's filter strings (implicitly AND-ed by the
+/// validate / applicable_collections logic) and collect every
+/// equality predicate that MUST hold for the combined filter to
+/// match. Returns `(field_name, value)` pairs.
+fn parse_forced_equalities(filters: &[String]) -> Result<Vec<(String, Value)>> {
+    let mut out = Vec::new();
+    for f in filters {
+        let expr = crate::query::Expr::parse(f).map_err(|e| {
+            VaultdbError::SchemaError(format!("parsing filter '{}': {}", f, e))
+        })?;
+        collect_forced_equalities(&expr, &mut out);
+    }
+    Ok(out)
+}
+
+fn collect_forced_equalities(expr: &crate::query::Expr, out: &mut Vec<(String, Value)>) {
+    use crate::query::{Expr, Predicate};
+    match expr {
+        Expr::Predicate(Predicate::Equals { field, value }) => {
+            out.push((field.clone(), value.clone()));
+        }
+        Expr::And(es) => {
+            for e in es {
+                collect_forced_equalities(e, out);
+            }
+        }
+        // `Or`, `Not`, and other predicates don't force a specific
+        // value on a specific field at the top level — skip them.
+        _ => {}
+    }
+}
+
+fn check_field_pair(
+    name_a: &str,
+    col_a: &CollectionSchema,
+    fs_a: &FieldSchema,
+    name_b: &str,
+    col_b: &CollectionSchema,
+    fs_b: &FieldSchema,
+    field_name: &str,
+) -> Result<()> {
+    if fs_a.field_type != fs_b.field_type {
+        return Err(VaultdbError::SchemaError(format!(
+            "collections '{}' (folder '{}') and '{}' (folder '{}') both declare field '{}' \
+             but with incompatible types '{}' vs '{}' — a single record under these folders \
+             must satisfy both, so the types must match",
+            name_a, col_a.folder, name_b, col_b.folder, field_name, fs_a.field_type, fs_b.field_type
+        )));
+    }
+
+    if !fs_a.enum_values.is_empty() && !fs_b.enum_values.is_empty() {
+        let any_shared = fs_a
+            .enum_values
+            .iter()
+            .any(|v| fs_b.enum_values.iter().any(|w| v == w));
+        if !any_shared {
+            return Err(VaultdbError::SchemaError(format!(
+                "collections '{}' and '{}' declare field '{}' with disjoint enum values \
+                 (folders '{}' and '{}' overlap, so no value can satisfy both)",
+                name_a, name_b, field_name, col_a.folder, col_b.folder
+            )));
+        }
+    }
+
+    let lo = match (fs_a.min, fs_b.min) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    let hi = match (fs_a.max, fs_b.max) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    if let (Some(l), Some(h)) = (lo, hi)
+        && l > h
+    {
+        return Err(VaultdbError::SchemaError(format!(
+            "collections '{}' and '{}' declare field '{}' with disjoint numeric ranges: \
+             effective min={} > max={}",
+            name_a, name_b, field_name, l, h
+        )));
+    }
+
+    Ok(())
+}
+
+/// True if `val` would pass `field_type`/`enum_values` validation against
+/// `fs`. Returns a human-readable reason on failure. Used by the
+/// cross-collection default check; mirrors the same single-collection
+/// rules that `validate_field_defaults` and `validate_record` enforce.
+fn default_satisfies(val: &Value, fs: &FieldSchema) -> std::result::Result<(), String> {
+    let actual = val.type_name();
+    if !type_matches(actual, &fs.field_type) {
+        return Err(format!(
+            "value type '{}' incompatible with field type '{}'",
+            actual, fs.field_type
+        ));
+    }
+    if let Value::String(s) = val {
+        let format_ok = match fs.field_type.as_str() {
+            "wikilink" => is_valid_wikilink(s),
+            "date" => is_valid_date(s),
+            "url" => is_valid_url(s),
+            _ => true,
+        };
+        if !format_ok {
+            return Err(format!("value '{}' is not a valid {}", s, fs.field_type));
+        }
+    }
+    if !fs.enum_values.is_empty() {
+        let display = val.display_value();
+        let m = fs.enum_values.iter().any(|e| match e {
+            Value::String(s) => s == &display,
+            Value::Integer(i) => i.to_string() == display,
+            Value::Float(f) => f.to_string() == display,
+            Value::Bool(b) => b.to_string() == display,
+            _ => false,
+        });
+        if !m {
+            return Err(format!("value '{}' not in declared enum values", display));
+        }
+    }
+    Ok(())
+}
+
+/// True if either folder is `==` the other or an ancestor of it.
+/// Used to decide which collection pairs need cross-checks.
+fn folders_overlap(a: &str, b: &str) -> bool {
+    folder_is_ancestor_or_equal(a, b) || folder_is_ancestor_or_equal(b, a)
 }
 
 /// Serialize a schema to YAML string.
@@ -1029,5 +1355,217 @@ collections:
         let err = load_schema(tmp.path()).unwrap_err().to_string();
         assert!(err.contains("year"), "got: {}", err);
         assert!(err.contains("incompatible"), "got: {}", err);
+    }
+
+    // ── Cross-collection consistency (Tier 1 + Tier 2) ────────────────────
+
+    fn fs_basic(field_type: &str) -> FieldSchema {
+        FieldSchema {
+            field_type: field_type.into(),
+            enum_values: vec![],
+            min: None,
+            max: None,
+            default: None,
+            default_expr: None,
+        }
+    }
+
+    fn col(folder: &str, fields: Vec<(&str, FieldSchema)>) -> CollectionSchema {
+        let mut m = BTreeMap::new();
+        for (k, v) in fields {
+            m.insert(k.into(), v);
+        }
+        CollectionSchema {
+            description: None,
+            folder: folder.into(),
+            filter: vec![],
+            required: vec![],
+            fields: m,
+        }
+    }
+
+    fn schema_of(pairs: Vec<(&str, CollectionSchema)>) -> VaultSchema {
+        let mut m = BTreeMap::new();
+        for (k, v) in pairs {
+            m.insert(k.into(), v);
+        }
+        VaultSchema { collections: m }
+    }
+
+    #[test]
+    fn consistency_rejects_conflicting_field_types() {
+        // Notes folder is ancestor of Notes/movie; both declare `tags`
+        // but with incompatible types.
+        let s = schema_of(vec![
+            ("Notes", col("Notes", vec![("tags", fs_basic("list"))])),
+            (
+                "movies",
+                col("Notes/movie", vec![("tags", fs_basic("string"))]),
+            ),
+        ]);
+        let err = validate_schema_consistency(&s).unwrap_err().to_string();
+        assert!(err.contains("tags"), "got: {}", err);
+        assert!(err.contains("incompatible"), "got: {}", err);
+    }
+
+    #[test]
+    fn consistency_allows_non_overlapping_folders_with_different_types() {
+        // Notes/movie and Notes/book are siblings — neither is ancestor
+        // of the other, so a single record can't be in both. The
+        // type-conflict check must skip this pair.
+        let s = schema_of(vec![
+            (
+                "movies",
+                col("Notes/movie", vec![("rating", fs_basic("string"))]),
+            ),
+            (
+                "games",
+                col("Notes/game", vec![("rating", fs_basic("integer"))]),
+            ),
+        ]);
+        validate_schema_consistency(&s).unwrap();
+    }
+
+    #[test]
+    fn consistency_allows_enum_narrowing() {
+        // Subset is the documented "narrowing" pattern (Notes.db-table
+        // declares all valid values; movies.db-table narrows to one).
+        let mut catchall = fs_basic("string");
+        catchall.enum_values = vec![
+            Value::String("movie".into()),
+            Value::String("book".into()),
+        ];
+        let mut narrow = fs_basic("string");
+        narrow.enum_values = vec![Value::String("movie".into())];
+
+        let s = schema_of(vec![
+            ("Notes", col("Notes", vec![("db-table", catchall)])),
+            ("movies", col("Notes/movie", vec![("db-table", narrow)])),
+        ]);
+        validate_schema_consistency(&s).unwrap();
+    }
+
+    #[test]
+    fn consistency_rejects_disjoint_enums() {
+        let mut a = fs_basic("string");
+        a.enum_values = vec![Value::String("movie".into())];
+        let mut b = fs_basic("string");
+        b.enum_values = vec![Value::String("book".into())];
+
+        let s = schema_of(vec![
+            ("Notes", col("Notes", vec![("db-table", a)])),
+            ("movies", col("Notes/movie", vec![("db-table", b)])),
+        ]);
+        let err = validate_schema_consistency(&s).unwrap_err().to_string();
+        assert!(err.contains("disjoint enum"), "got: {}", err);
+    }
+
+    #[test]
+    fn consistency_rejects_disjoint_ranges() {
+        let mut a = fs_basic("integer");
+        a.min = Some(2000.0);
+        a.max = Some(3000.0);
+        let mut b = fs_basic("integer");
+        b.min = Some(1000.0);
+        b.max = Some(1500.0);
+        let s = schema_of(vec![
+            ("Notes", col("Notes", vec![("year", a)])),
+            ("movies", col("Notes/movie", vec![("year", b)])),
+        ]);
+        let err = validate_schema_consistency(&s).unwrap_err().to_string();
+        assert!(err.contains("disjoint numeric ranges"), "got: {}", err);
+    }
+
+    #[test]
+    fn consistency_rejects_default_violating_overlapping_collection() {
+        // Movies declares status default = "to-watch", but Notes
+        // catch-all narrows status enum to ["a", "b"]. The default
+        // would silently break every movie create.
+        let mut catchall = fs_basic("string");
+        catchall.enum_values = vec![Value::String("a".into()), Value::String("b".into())];
+        let mut movie = fs_basic("string");
+        movie.enum_values = vec![
+            Value::String("a".into()),
+            Value::String("b".into()),
+            Value::String("to-watch".into()),
+        ];
+        movie.default = Some(Value::String("to-watch".into()));
+
+        let s = schema_of(vec![
+            ("Notes", col("Notes", vec![("status", catchall)])),
+            ("movies", col("Notes/movie", vec![("status", movie)])),
+        ]);
+        let err = validate_schema_consistency(&s).unwrap_err().to_string();
+        assert!(err.contains("default"), "got: {}", err);
+        assert!(err.contains("status"), "got: {}", err);
+    }
+
+    #[test]
+    fn consistency_skips_check_when_filters_are_disjoint() {
+        // Real-world case from the user's vault: two collections whose
+        // folders overlap (Notes is ancestor of Notes/archive), but
+        // whose filters are mutually exclusive equality predicates on
+        // the same field (`db-table = index` vs `db-table = archive`).
+        // No record can satisfy both filters at once, so the
+        // disjoint-enums on `db-table` is *not* an error — it's the
+        // pattern that makes the filter scheme work.
+        let mut indexes_db = fs_basic("string");
+        indexes_db.enum_values = vec![Value::String("index".into())];
+        let mut archive_db = fs_basic("string");
+        archive_db.enum_values = vec![Value::String("archive".into())];
+
+        let s = schema_of(vec![
+            (
+                "indexes",
+                CollectionSchema {
+                    description: None,
+                    folder: "Notes".into(),
+                    filter: vec!["db-table = index".into()],
+                    required: vec![],
+                    fields: {
+                        let mut m = BTreeMap::new();
+                        m.insert("db-table".into(), indexes_db);
+                        m
+                    },
+                },
+            ),
+            (
+                "archive",
+                CollectionSchema {
+                    description: None,
+                    folder: "Notes/archive".into(),
+                    filter: vec!["db-table = archive".into()],
+                    required: vec![],
+                    fields: {
+                        let mut m = BTreeMap::new();
+                        m.insert("db-table".into(), archive_db);
+                        m
+                    },
+                },
+            ),
+        ]);
+        validate_schema_consistency(&s).unwrap();
+    }
+
+    #[test]
+    fn consistency_accepts_default_compatible_with_overlapping_collection() {
+        // Default = "to-watch" satisfies BOTH collections' enums.
+        let mut catchall = fs_basic("string");
+        catchall.enum_values = vec![
+            Value::String("to-watch".into()),
+            Value::String("watched".into()),
+        ];
+        let mut movie = fs_basic("string");
+        movie.enum_values = vec![
+            Value::String("to-watch".into()),
+            Value::String("watched".into()),
+        ];
+        movie.default = Some(Value::String("to-watch".into()));
+
+        let s = schema_of(vec![
+            ("Notes", col("Notes", vec![("status", catchall)])),
+            ("movies", col("Notes/movie", vec![("status", movie)])),
+        ]);
+        validate_schema_consistency(&s).unwrap();
     }
 }

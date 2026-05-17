@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use vaultdb_core::error::VaultdbError;
+use vaultdb_core::schema;
 use vaultdb_core::vault::Vault;
 use vaultdb_core::{Expr, MutationReport, UpdateBuilder, Value};
 
@@ -93,6 +94,17 @@ pub fn run_update(
             UpdateOp::AddTag { tag } => builder.add_tag(tag),
             UpdateOp::RemoveTag { tag } => builder.remove_tag(tag),
         };
+    }
+
+    // Schema enforcement: when a schema file exists, the post-update
+    // record must validate against every applicable collection.
+    // Malformed schema files fail the command instead of silently
+    // skipping enforcement.
+    let schema_path = schema::schema_path(&vault.root);
+    if schema_path.is_file() {
+        let vault_schema = schema::load_schema(&schema_path)
+            .context(format!("loading {}", schema_path.display()))?;
+        builder = builder.with_vault_schema(vault_schema);
     }
 
     let report = if dry_run {

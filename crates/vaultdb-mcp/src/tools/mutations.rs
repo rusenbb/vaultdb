@@ -28,15 +28,17 @@ use crate::params::{
 };
 
 pub fn plan_update(vault: &Vault, params: PlanUpdateParams) -> Result<MutationReport, ErrorData> {
-    build_update(params)?
+    build_update(vault, params)?
         .plan(vault)
         .map_err(|e| invalid_params(format!("plan_update failed: {}", e)))
 }
 
 /// Shared UpdateBuilder construction for plan_update / execute_update.
 /// Applies legacy `set` first, then `set_typed` (so typed values win
-/// on key collision — new code naturally takes precedence).
-fn build_update(params: PlanUpdateParams) -> Result<UpdateBuilder, ErrorData> {
+/// on key collision — new code naturally takes precedence). Attaches
+/// the vault-wide schema when one exists so the post-update record is
+/// validated against every applicable collection before writing.
+fn build_update(vault: &Vault, params: PlanUpdateParams) -> Result<UpdateBuilder, ErrorData> {
     let filter = parse_where(&params.r#where)?;
     let mut builder = UpdateBuilder::new(params.folder, filter);
 
@@ -58,7 +60,24 @@ fn build_update(params: PlanUpdateParams) -> Result<UpdateBuilder, ErrorData> {
     for tag in params.remove_tag {
         builder = builder.remove_tag(tag);
     }
+    if let Some(vs) = load_vault_schema_opt(vault)? {
+        builder = builder.with_vault_schema(vs);
+    }
     Ok(builder)
+}
+
+/// Best-effort schema load. Returns `None` if no schema file exists
+/// (no enforcement applies); returns an `ErrorData` if the file
+/// exists but is malformed — in that case mutations refuse to run
+/// rather than silently downgrade to "no schema."
+fn load_vault_schema_opt(vault: &Vault) -> Result<Option<schema::VaultSchema>, ErrorData> {
+    let path = schema::schema_path(&vault.root);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let s = schema::load_schema(&path)
+        .map_err(|e| invalid_params(format!("loading {}: {}", path.display(), e)))?;
+    Ok(Some(s))
 }
 
 pub fn plan_delete(vault: &Vault, params: PlanDeleteParams) -> Result<MutationReport, ErrorData> {
@@ -121,7 +140,7 @@ pub fn execute_update(
 ) -> Result<MutationReport, ErrorData> {
     let folder = params.folder.clone();
     let where_str = params.r#where.clone();
-    let report = build_update(params)?
+    let report = build_update(vault, params)?
         .execute(vault)
         .map_err(|e| invalid_params(format!("execute_update failed: {}", e)))?;
     audit(
@@ -196,7 +215,7 @@ pub fn execute_rename(
 /// Shared CreateBuilder construction for plan_create / execute_create.
 fn build_create(vault: &Vault, params: PlanCreateParams) -> Result<CreateBuilder, ErrorData> {
     let folder = params.folder.clone();
-    let mut builder = CreateBuilder::new(folder.clone(), params.name);
+    let mut builder = CreateBuilder::new(folder, params.name);
 
     if let Some(t) = params.template {
         builder = builder.template(t);
@@ -206,13 +225,8 @@ fn build_create(vault: &Vault, params: PlanCreateParams) -> Result<CreateBuilder
         builder = builder.set(field, json_to_vaultdb_value(json_value));
     }
 
-    let schema_path = schema::schema_path(&vault.root);
-    if schema_path.is_file() {
-        let vault_schema = schema::load_schema(&schema_path)
-            .map_err(|e| invalid_params(format!("loading {}: {}", schema_path.display(), e)))?;
-        if let Some(collection) = vault_schema.collection_for_folder(&folder) {
-            builder = builder.with_schema(collection.clone());
-        }
+    if let Some(vs) = load_vault_schema_opt(vault)? {
+        builder = builder.with_vault_schema(vs);
     }
 
     Ok(builder)
