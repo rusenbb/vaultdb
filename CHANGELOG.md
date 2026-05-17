@@ -5,6 +5,62 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.1] — UpdateBuilder no longer double-quotes string scalars
+
+### Fixed
+
+- `UpdateBuilder::set(field, Value::String(_))` was running a two-layer
+  quoting pass on every string value, producing a double-wrapped scalar
+  on disk for any string containing a YAML-special character. Setting
+  a URL like `https://www.amazon.com.tr/foo` landed as
+  `url: "'https://www.amazon.com.tr/foo'"` (literal single quotes
+  surrounded by double quotes) rather than the intended
+  `url: 'https://www.amazon.com.tr/foo'`. When parsed back, the value
+  was a string *containing the quote characters*, not the bare URL.
+
+  Cause: `mutation::render_value_for_yaml` already calls
+  `writer::quote_value` to produce a YAML-ready scalar, then handed the
+  result to `writer::set_field`, which ran `yaml_quote_value` a second
+  time. Because the value now contained `'`, the second pass wrapped it
+  in double quotes.
+
+  Fix: new `writer::set_field_preformatted` that writes its input
+  verbatim (caller asserts the value is already a valid YAML scalar).
+  `UpdateBuilder::compute` routes the scalar set path through it.
+  `writer::set_field` (raw-string contract) is unchanged for its
+  remaining direct callers.
+
+  Affected paths in 1.3.0:
+  - MCP `plan_update` / `execute_update` with `set_typed` containing
+    any string value with `:`, `#`, `&`, `|`, etc.
+  - CLI `update --set field=value` for the same character classes.
+  - ORM `Update<T>::set` with typed `Value::String`.
+
+- `yaml_quote_value` now also quotes **type-ambiguous bare scalars** —
+  strings that, written without quotes, would parse as a different
+  YAML type. Pre-1.3.1, `Value::String("true")` round-tripped through
+  an update as the boolean `true`, and `Value::String("42")` as the
+  integer `42`. After 1.3.1, both keep their string type — `'true'`
+  and `'42'` on disk. Covers the YAML 1.1 truthy/null literals
+  (`true / false / yes / no / on / off / null / ~`,
+  case-insensitive) and anything that `f64::parse` accepts.
+
+### Tests
+
+- `mutation::tests::update_builder_writes_url_string_without_double_quoting`:
+  end-to-end repro of the Bialetti / Amazon URL case. Asserts the
+  on-disk shape is single-quoted and round-trips back through
+  `Vault::load_records` as the bare URL.
+- `mutation::tests::update_builder_preserves_string_that_looks_like_bool`:
+  `Value::String("true")` round-trips as the string "true", not the
+  boolean `true`.
+- `writer::tests::set_field_preformatted_writes_value_verbatim`:
+  defends the new function's contract — a pre-quoted input is not
+  re-quoted.
+- `writer::tests::set_field_still_quotes_raw_values`: confirms the
+  public `set_field` still quotes raw strings exactly once (no
+  regression on its existing contract).
+
 ## [1.3.0] — Strict whole-record schema enforcement on every write
 
 The headline: if a `vaultdb-schema.yaml` exists, every create and

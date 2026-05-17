@@ -229,18 +229,22 @@ impl UpdateBuilder {
 
             let result: Result<()> = (|| {
                 for (field, value) in &self.set_fields {
-                    // Scalars go through the single-line set_field path; lists
-                    // and maps go through set_field_block so the typed shape
-                    // is preserved as block-style YAML rather than flattened
-                    // into a quoted scalar. See `render_value_for_yaml` for
-                    // the pre-1.2.1 behaviour that this fixes.
+                    // Scalars go through set_field_preformatted because
+                    // render_value_for_yaml already produces a valid YAML
+                    // scalar (calling writer::quote_value internally for
+                    // strings). Routing through plain set_field would
+                    // double-quote on disk — a URL value `https://x.com`
+                    // would land as `"'https://x.com'"`. See 1.3.1 changelog.
+                    // Lists and maps go through set_field_block so the
+                    // typed shape is preserved as block-style YAML rather
+                    // than flattened into a quoted scalar (1.2.1 fix).
                     let (new_content, change) = match value {
                         Value::List(_) | Value::Map(_) => {
                             writer::set_field_block(&content, field, value)?
                         }
                         _ => {
                             let value_str = render_value_for_yaml(value);
-                            writer::set_field(&content, field, &value_str)?
+                            writer::set_field_preformatted(&content, field, &value_str)?
                         }
                     };
                     description_parts.push(format!("{}", change));
@@ -1153,6 +1157,103 @@ fn render_value_for_yaml(v: &Value) -> String {
 mod tests {
     use super::*;
     use crate::query::Predicate;
+
+    /// Regression test for the 1.3.0 double-quoting bug: setting a
+    /// `Value::String` with characters that need YAML quoting (`:`,
+    /// `&`, leading `-`, etc.) used to be quoted twice — first by
+    /// `render_value_for_yaml` and then again inside `writer::set_field`
+    /// — producing `url: "'https://x.com'"` instead of
+    /// `url: 'https://x.com'`. 1.3.1 routes the scalar set through
+    /// `writer::set_field_preformatted`, which writes the YAML-ready
+    /// value verbatim.
+    #[test]
+    fn update_builder_writes_url_string_without_double_quoting() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/product.md"),
+            "---\nname: bialetti\nurl:\n---\n\n# Bialetti\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("product".into()),
+        });
+        let url = Value::String("https://www.amazon.com.tr/Bialetti/foo".into());
+        UpdateBuilder::new("notes", filter)
+            .set("url", url)
+            .execute(&vault)
+            .unwrap();
+
+        let written = fs::read_to_string(dir.path().join("notes/product.md")).unwrap();
+        // Correct: single quotes, no enclosing double quotes.
+        assert!(
+            written.contains("url: 'https://www.amazon.com.tr/Bialetti/foo'"),
+            "got:\n{}",
+            written
+        );
+        // The pre-fix corrupt shape must not appear.
+        assert!(!written.contains("url: \"'https://"), "got:\n{}", written);
+
+        // Re-read through Vault::load_records: the field must come back
+        // as the bare URL, not a string containing literal quotes.
+        let records = vault
+            .load_records(&dir.path().join("notes"), false, false)
+            .unwrap()
+            .records;
+        let product = &records[0];
+        match product.fields.get("url") {
+            Some(Value::String(s)) => {
+                assert_eq!(s, "https://www.amazon.com.tr/Bialetti/foo");
+            }
+            other => panic!("expected Value::String(bare URL), got {:?}", other),
+        }
+    }
+
+    /// Type-preservation: `Value::String("true")` must round-trip as
+    /// the string `"true"`, not the boolean `true`. The fix preserves
+    /// the explicit quoting added by `render_value_for_yaml`, which
+    /// disambiguates string-looking-like-boolean from real booleans.
+    #[test]
+    fn update_builder_preserves_string_that_looks_like_bool() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/n.md"),
+            "---\nname: n\nstatus:\n---\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("n".into()),
+        });
+        UpdateBuilder::new("notes", filter)
+            .set("status", Value::String("true".into()))
+            .execute(&vault)
+            .unwrap();
+
+        let records = vault
+            .load_records(&dir.path().join("notes"), false, false)
+            .unwrap()
+            .records;
+        match records[0].fields.get("status") {
+            Some(Value::String(s)) if s == "true" => {}
+            other => panic!(
+                "expected status to round-trip as Value::String(\"true\"), got {:?}",
+                other
+            ),
+        }
+    }
 
     /// Regression test for the 1.1.0–1.2.0 typed-set bug: setting a
     /// `Value::List` via `UpdateBuilder::set` used to flatten the value

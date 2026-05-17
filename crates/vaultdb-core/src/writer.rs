@@ -243,7 +243,13 @@ fn yaml_quote_value(value: &str) -> String {
         || value.starts_with(' ')
         || value.ends_with(' ')
         || value.starts_with('-')
-        || value.starts_with('?');
+        || value.starts_with('?')
+        // Type-ambiguous bare scalars: without quoting, these would
+        // parse as a different YAML type when re-read (e.g. `true` →
+        // boolean, `42` → integer, `~` → null). Quote them so a
+        // `Value::String("true")` round-trips as the string "true"
+        // and not the boolean true.
+        || is_yaml_type_ambiguous_bare_scalar(value);
 
     if needs_quoting {
         if value.contains('\'') {
@@ -256,10 +262,83 @@ fn yaml_quote_value(value: &str) -> String {
     }
 }
 
-/// Set a scalar field to a new value in the frontmatter.
+/// True if `value`, written without YAML quotes, would parse as a
+/// non-string scalar (boolean / null / integer / float). Used by
+/// `yaml_quote_value` to force quoting on these strings so they
+/// round-trip as strings rather than silently changing type.
+fn is_yaml_type_ambiguous_bare_scalar(value: &str) -> bool {
+    // YAML 1.1 boolean / null literals — same set Obsidian / serde_yaml
+    // accept on read. Match case-insensitively to be safe.
+    let lower = value.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~"
+    ) {
+        return true;
+    }
+    // Numeric: integer or float. `parse::<f64>` accepts both shapes
+    // including `+1`, `-0.5`, `1e10`, but rejects empty strings.
+    if !value.is_empty() && value.parse::<f64>().is_ok() {
+        return true;
+    }
+    // Leading zero or sign with rest digits could be an int that
+    // f64::parse already covers — no extra branch needed.
+    false
+}
+
+/// Set a scalar field to a new value in the frontmatter. The `value`
+/// is treated as a **raw, unquoted scalar** — `yaml_quote_value` is
+/// applied to it before writing. Use this when you have a plain Rust
+/// string (e.g. `"https://example.com"`, `"true"`) and want it
+/// emitted as a properly-quoted YAML scalar.
+///
+/// For values that are already a valid YAML scalar (e.g. produced by
+/// a higher-level renderer that has already applied quoting rules),
+/// call [`set_field_preformatted`] instead — double-quoting will
+/// otherwise turn `'https://x'` into `"'https://x'"` on disk.
 pub fn set_field(content: &str, key: &str, value: &str) -> Result<(String, ChangeDescription)> {
-    let (fm_lines, body) = split_frontmatter(content)?;
     let quoted_value = yaml_quote_value(value);
+    set_field_with_formatted(content, key, &quoted_value, value)
+}
+
+/// Set a scalar field to a value that is **already a valid YAML
+/// scalar**. The string is written verbatim — no extra quoting.
+///
+/// This exists to fix a two-layer-quoting bug introduced by callers
+/// (notably `UpdateBuilder::set` via `render_value_for_yaml`) that
+/// already apply `yaml_quote_value` themselves. If those callers
+/// passed their pre-quoted output to [`set_field`], it would be
+/// quoted a second time — a URL like `https://example.com`, having
+/// already become `'https://example.com'`, would be re-wrapped as
+/// `"'https://example.com'"`. Routing through this function instead
+/// preserves the intended YAML shape.
+///
+/// The caller asserts that `yaml_value` parses as the intended YAML
+/// scalar. If it doesn't, the on-disk file will fail to re-parse;
+/// there is no defence-in-depth check here on purpose, because
+/// guessing whether the input is "already-quoted" or "literal text
+/// containing quote characters" is ambiguous.
+pub fn set_field_preformatted(
+    content: &str,
+    key: &str,
+    yaml_value: &str,
+) -> Result<(String, ChangeDescription)> {
+    set_field_with_formatted(content, key, yaml_value, yaml_value)
+}
+
+/// Shared implementation behind [`set_field`] and
+/// [`set_field_preformatted`]. `formatted_value` is what lands on
+/// disk; `change_value` is what appears in the `ChangeDescription`
+/// surfaced to users / agents (typically the raw, un-quoted form
+/// for `set_field`; the same as `formatted_value` for the
+/// preformatted path).
+fn set_field_with_formatted(
+    content: &str,
+    key: &str,
+    formatted_value: &str,
+    change_value: &str,
+) -> Result<(String, ChangeDescription)> {
+    let (fm_lines, body) = split_frontmatter(content)?;
 
     if let Some(key_idx) = find_key_line(&fm_lines, key) {
         let extent = field_extent(&fm_lines, key_idx);
@@ -294,14 +373,13 @@ pub fn set_field(content: &str, key: &str, value: &str) -> Result<(String, Chang
         }
 
         let old_line = fm_lines[key_idx];
-        // Extract old value for the change description
         let old_value = old_line
             .find(':')
             .map(|pos| old_line[pos + 1..].trim())
             .unwrap_or("")
             .to_string();
 
-        let new_line = format!("{}: {}", key, quoted_value);
+        let new_line = format!("{}: {}", key, formatted_value);
 
         let mut result_lines: Vec<String> = Vec::new();
         for (i, line) in fm_lines.iter().enumerate() {
@@ -315,7 +393,7 @@ pub fn set_field(content: &str, key: &str, value: &str) -> Result<(String, Chang
         let change = ChangeDescription::SetField {
             field: key.to_string(),
             old_value,
-            new_value: value.to_string(),
+            new_value: change_value.to_string(),
         };
 
         Ok((reassemble(&result_lines, body, content), change))
@@ -324,7 +402,7 @@ pub fn set_field(content: &str, key: &str, value: &str) -> Result<(String, Chang
         let mut result_lines: Vec<String> = Vec::new();
         for (i, line) in fm_lines.iter().enumerate() {
             if i == fm_lines.len() - 1 && line.trim() == "---" {
-                result_lines.push(format!("{}: {}", key, quoted_value));
+                result_lines.push(format!("{}: {}", key, formatted_value));
             }
             result_lines.push(line.to_string());
         }
@@ -332,7 +410,7 @@ pub fn set_field(content: &str, key: &str, value: &str) -> Result<(String, Chang
         let change = ChangeDescription::SetField {
             field: key.to_string(),
             old_value: String::new(),
-            new_value: value.to_string(),
+            new_value: change_value.to_string(),
         };
 
         Ok((reassemble(&result_lines, body, content), change))
@@ -811,8 +889,16 @@ Body text.
 
     #[test]
     fn set_null_field() {
+        // 1.3.1: `yaml_quote_value` now quotes type-ambiguous bare
+        // scalars (booleans, null, numbers) so a `Value::String("8")`
+        // round-trips as the string "8" rather than the integer 8.
+        // For typed callers (UpdateBuilder via `Value::Integer(8)` →
+        // `render_value_for_yaml` → "8" → `set_field_preformatted`)
+        // an integer still lands as `rating: 8`. This test exercises
+        // the raw `set_field` path directly with a string value, so
+        // the quoted form is correct.
         let (result, _) = set_field(MOVIE_FILE, "rating", "8").unwrap();
-        assert!(result.contains("rating: 8"));
+        assert!(result.contains("rating: '8'"), "got:\n{}", result);
     }
 
     #[test]
@@ -1083,5 +1169,41 @@ Body text.
         let target = dir.path().join("fresh.md");
         atomic_create_with(&target, "hello\n", WriteOptions::default()).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn set_field_preformatted_writes_value_verbatim() {
+        // `set_field_preformatted` must NOT call yaml_quote_value on its
+        // input — it's the caller's contract that the value is already
+        // a valid YAML scalar. Pre-fix, an already-single-quoted URL
+        // was re-wrapped in double quotes by `set_field`.
+        let content = "---\nurl:\n---\nBody\n";
+        let preformatted = "'https://www.amazon.com.tr/foo'";
+        let (out, _) = set_field_preformatted(content, "url", preformatted).unwrap();
+        assert!(
+            out.contains("url: 'https://www.amazon.com.tr/foo'"),
+            "got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("url: \"'"),
+            "preformatted value was double-quoted; got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn set_field_still_quotes_raw_values() {
+        // Sanity: the public `set_field` is unchanged — raw strings
+        // with special characters still get quoted exactly once.
+        let content = "---\nurl:\n---\n";
+        let (out, _) = set_field(content, "url", "https://www.example.com").unwrap();
+        assert!(
+            out.contains("url: 'https://www.example.com'"),
+            "got:\n{}",
+            out
+        );
+        // No double-quoted wrapping.
+        assert!(!out.contains("url: \"'"), "got:\n{}", out);
     }
 }
