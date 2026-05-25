@@ -54,6 +54,7 @@ pub struct UpdateBuilder {
     remove_tags: Vec<String>,
     vault_schema: Option<crate::schema::VaultSchema>,
     write_options: writer::WriteOptions,
+    recursive: bool,
 }
 
 impl UpdateBuilder {
@@ -67,7 +68,17 @@ impl UpdateBuilder {
             remove_tags: Vec::new(),
             vault_schema: None,
             write_options: writer::WriteOptions::default(),
+            recursive: false,
         }
+    }
+
+    /// Recurse into subfolders when selecting records to update (default
+    /// false — only files directly in `folder` are considered). Mirrors
+    /// the `query` recursion flag, so a `--where` mutation can span a
+    /// subtree of scattered records (e.g. `index` notes) in one call.
+    pub fn recursive(mut self, yes: bool) -> Self {
+        self.recursive = yes;
+        self
     }
 
     pub fn set(mut self, field: impl Into<String>, value: Value) -> Self {
@@ -142,7 +153,7 @@ impl UpdateBuilder {
 
     fn compute(&self, vault: &Vault) -> Result<(MutationReport, Vec<WriteResult>)> {
         let folder_path = vault.resolve_folder(&self.folder)?;
-        let load = vault.load_records_with_content(&folder_path, false, false)?;
+        let load = vault.load_records_with_content(&folder_path, self.recursive, false)?;
         let needs_links = crate::filter::expr_uses_links(&self.filter);
         let link_index = if needs_links {
             Some(crate::links::LinkGraph::build_with_root(
@@ -274,7 +285,10 @@ impl UpdateBuilder {
 
             match result {
                 Ok(_) => {
-                    if !wr_changes.is_empty() {
+                    // Skip records whose net content is unchanged (e.g. a
+                    // field set to the value already on disk): no rewrite,
+                    // no reported change. Avoids mtime churn on no-op sets.
+                    if !wr_changes.is_empty() && content != original_content {
                         writes.push(WriteResult {
                             path: record.path.clone(),
                             original_content,
@@ -348,6 +362,7 @@ pub struct DeleteBuilder {
     folder: String,
     permanent: bool,
     write_options: writer::WriteOptions,
+    recursive: bool,
 }
 
 impl DeleteBuilder {
@@ -357,7 +372,15 @@ impl DeleteBuilder {
             folder: folder.into(),
             permanent: false,
             write_options: writer::WriteOptions::default(),
+            recursive: false,
         }
+    }
+
+    /// Recurse into subfolders when selecting records to delete (default
+    /// false — only files directly in `folder` are considered).
+    pub fn recursive(mut self, yes: bool) -> Self {
+        self.recursive = yes;
+        self
     }
 
     pub fn permanent(mut self, yes: bool) -> Self {
@@ -380,7 +403,7 @@ impl DeleteBuilder {
 
     pub fn plan(&self, vault: &Vault) -> Result<MutationReport> {
         let folder_path = vault.resolve_folder(&self.folder)?;
-        let load = vault.load_records(&folder_path, false, false)?;
+        let load = vault.load_records(&folder_path, self.recursive, false)?;
         let needs_links = crate::filter::expr_uses_links(&self.filter);
         let link_index = if needs_links {
             Some(crate::links::LinkGraph::build_with_root(
@@ -501,6 +524,7 @@ pub struct MoveBuilder {
     folder: String,
     to_folder: String,
     write_options: writer::WriteOptions,
+    recursive: bool,
 }
 
 impl MoveBuilder {
@@ -510,7 +534,15 @@ impl MoveBuilder {
             folder: folder.into(),
             to_folder: to_folder.into(),
             write_options: writer::WriteOptions::default(),
+            recursive: false,
         }
+    }
+
+    /// Recurse into subfolders when selecting records to move (default
+    /// false — only files directly in `folder` are considered).
+    pub fn recursive(mut self, yes: bool) -> Self {
+        self.recursive = yes;
+        self
     }
 
     /// Replace the [`writer::WriteOptions`] used by `execute`.
@@ -528,7 +560,7 @@ impl MoveBuilder {
     pub fn plan(&self, vault: &Vault) -> Result<MutationReport> {
         let folder_path = vault.resolve_folder(&self.folder)?;
         let to_path = vault.root.join(&self.to_folder);
-        let load = vault.load_records(&folder_path, false, false)?;
+        let load = vault.load_records(&folder_path, self.recursive, false)?;
         let needs_links = crate::filter::expr_uses_links(&self.filter);
         let link_index = if needs_links {
             Some(crate::links::LinkGraph::build_with_root(
@@ -1315,6 +1347,85 @@ mod tests {
             }
             other => panic!("expected Value::List, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn update_builder_skips_noop_set() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/a.md"),
+            "---\nstatus: active\n---\n\nBody\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("a".into()),
+        });
+        // Set status to the value already on disk → net no change.
+        let report = UpdateBuilder::new("notes", filter)
+            .set("status", Value::String("active".into()))
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(report.errors.len(), 0);
+        assert_eq!(
+            report.changes.len(),
+            0,
+            "a no-op set must not be reported as a change"
+        );
+    }
+
+    #[test]
+    fn update_builder_recursive_reaches_subfolders() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::create_dir(dir.path().join("notes/sub")).unwrap();
+        fs::write(
+            dir.path().join("notes/sub/deep.md"),
+            "---\nstatus: old\n---\n\nBody\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "status".into(),
+            value: Value::String("old".into()),
+        });
+
+        // Default (non-recursive): the subfolder record is not seen.
+        let shallow = UpdateBuilder::new("notes", filter.clone())
+            .set("status", Value::String("new".into()))
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(
+            shallow.changes.len(),
+            0,
+            "non-recursive update must skip subfolders"
+        );
+
+        // Opt-in recursive: the subfolder record is updated.
+        let deep = UpdateBuilder::new("notes", filter)
+            .recursive(true)
+            .set("status", Value::String("new".into()))
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(deep.errors.len(), 0);
+        assert_eq!(
+            deep.changes.len(),
+            1,
+            "recursive update must reach subfolders"
+        );
+        assert!(deep.changes[0].path.ends_with("deep.md"));
+        let written = fs::read_to_string(dir.path().join("notes/sub/deep.md")).unwrap();
+        assert!(written.contains("status: new"), "got:\n{}", written);
     }
 
     #[test]

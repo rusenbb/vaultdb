@@ -40,7 +40,7 @@ pub fn plan_update(vault: &Vault, params: PlanUpdateParams) -> Result<MutationRe
 /// validated against every applicable collection before writing.
 fn build_update(vault: &Vault, params: PlanUpdateParams) -> Result<UpdateBuilder, ErrorData> {
     let filter = parse_where(&params.r#where)?;
-    let mut builder = UpdateBuilder::new(params.folder, filter);
+    let mut builder = UpdateBuilder::new(params.folder, filter).recursive(params.recursive);
 
     for s in params.set {
         let (field, value_str) = s.split_once('=').ok_or_else(|| {
@@ -84,6 +84,7 @@ pub fn plan_delete(vault: &Vault, params: PlanDeleteParams) -> Result<MutationRe
     let filter = parse_where(&params.r#where)?;
     DeleteBuilder::new(params.folder, filter)
         .permanent(params.permanent)
+        .recursive(params.recursive)
         .plan(vault)
         .map_err(|e| invalid_params(format!("plan_delete failed: {}", e)))
 }
@@ -91,6 +92,7 @@ pub fn plan_delete(vault: &Vault, params: PlanDeleteParams) -> Result<MutationRe
 pub fn plan_move(vault: &Vault, params: PlanMoveParams) -> Result<MutationReport, ErrorData> {
     let filter = parse_where(&params.r#where)?;
     MoveBuilder::new(params.folder, params.to, filter)
+        .recursive(params.recursive)
         .plan(vault)
         .map_err(|e| invalid_params(format!("plan_move failed: {}", e)))
 }
@@ -162,6 +164,7 @@ pub fn execute_delete(
     let filter = parse_where(&params.r#where)?;
     let report = DeleteBuilder::new(params.folder, filter)
         .permanent(params.permanent)
+        .recursive(params.recursive)
         .execute(vault)
         .map_err(|e| invalid_params(format!("execute_delete failed: {}", e)))?;
     audit(
@@ -182,6 +185,7 @@ pub fn execute_move(vault: &Vault, params: PlanMoveParams) -> Result<MutationRep
     let where_str = params.r#where.clone();
     let filter = parse_where(&params.r#where)?;
     let report = MoveBuilder::new(params.folder, params.to, filter)
+        .recursive(params.recursive)
         .execute(vault)
         .map_err(|e| invalid_params(format!("execute_move failed: {}", e)))?;
     audit(

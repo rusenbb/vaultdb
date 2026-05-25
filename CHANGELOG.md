@@ -5,6 +5,39 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.0] — Writer initializes & retypes frontmatter; opt-in recursive mutations
+
+### Added
+
+- **Recursive mutations (opt-in).** `UpdateBuilder`, `DeleteBuilder`, and
+  `MoveBuilder` gained `.recursive(bool)` (default `false`). The CLI's global
+  `--recursive` flag and a new `recursive` parameter on the MCP
+  `update`/`move`/`delete` tools now actually reach the mutation, so a single
+  `--where` mutation can span a subtree of scattered records (e.g. `index`
+  notes that live in topical folders). Previously `--recursive` was accepted
+  but silently ignored on mutations — only files directly in the named folder
+  were ever touched.
+
+### Fixed
+
+- **The writer can now initialize frontmatter on a bare file.** `set_field` /
+  `add_tag` / `unset_field` previously failed with `NoFrontmatter` on a `.md`
+  file that had no `---` block (e.g. a note created in Obsidian). The writer
+  now synthesizes an empty frontmatter block and inserts into it, so an
+  externally-authored note can be brought under schema management through
+  vaultdb. A file that *opens* a frontmatter block but never closes it is
+  still rejected as malformed.
+- **A scalar can replace a block-style list/map field in a single set.**
+  Setting a scalar over an existing block list/map previously refused
+  ("complex type … use `--unset` first"); but for a *required* field stored
+  as the wrong type, that unset would itself fail the required-field check —
+  leaving no in-vaultdb path to repair the record. `set_field` now replaces
+  the field's whole span with the new scalar. Flow-style lists (`[a, b]`) and
+  multiline scalars (`|`, `>`) remain intentionally non-round-tripped.
+- **No-op updates no longer rewrite files.** An `UpdateBuilder` set whose net
+  result equals the on-disk content is now skipped — no reported change and
+  no file rewrite, avoiding mtime churn.
+
 ## [1.3.1] — UpdateBuilder no longer double-quotes string scalars
 
 ### Fixed

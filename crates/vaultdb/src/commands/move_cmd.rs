@@ -12,7 +12,7 @@ pub fn run_move(
     where_strs: &[String],
     target_folder: &str,
     dry_run: bool,
-    _recursive: bool,
+    recursive: bool,
     _verbose: bool,
 ) -> Result<()> {
     if where_strs.is_empty() {
@@ -31,8 +31,9 @@ pub fn run_move(
         _ => Expr::And(exprs),
     };
 
-    let plan_report =
-        MoveBuilder::new(folder, target_folder.to_string(), filter.clone()).plan(vault)?;
+    let plan_report = MoveBuilder::new(folder, target_folder.to_string(), filter.clone())
+        .recursive(recursive)
+        .plan(vault)?;
 
     if plan_report.changes.is_empty() && plan_report.errors.is_empty() {
         println!("No matching records.");
@@ -78,7 +79,9 @@ pub fn run_move(
         return Ok(());
     }
 
-    let exec_report = MoveBuilder::new(folder, target_folder.to_string(), filter).execute(vault)?;
+    let exec_report = MoveBuilder::new(folder, target_folder.to_string(), filter)
+        .recursive(recursive)
+        .execute(vault)?;
     for err in &exec_report.errors {
         let rel = err.path.strip_prefix(&vault.root).unwrap_or(&err.path);
         eprintln!("{} {}: {}", "error:".red(), rel.display(), err.message);

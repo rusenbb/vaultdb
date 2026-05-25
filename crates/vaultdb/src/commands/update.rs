@@ -64,7 +64,7 @@ pub fn run_update(
     where_strs: &[String],
     ops: &[UpdateOp],
     dry_run: bool,
-    _recursive: bool,
+    recursive: bool,
     _verbose: bool,
 ) -> Result<()> {
     if where_strs.is_empty() {
@@ -86,7 +86,7 @@ pub fn run_update(
         _ => Expr::And(exprs),
     };
 
-    let mut builder = UpdateBuilder::new(folder, filter);
+    let mut builder = UpdateBuilder::new(folder, filter).recursive(recursive);
     for op in ops {
         builder = match op {
             UpdateOp::Set { field, value } => builder.set(field, Value::parse_scalar(value)),

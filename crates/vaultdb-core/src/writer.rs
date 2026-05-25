@@ -57,7 +57,12 @@ fn split_frontmatter(content: &str) -> Result<(Vec<&str>, &str)> {
     let lines: Vec<&str> = content.lines().collect();
 
     if lines.is_empty() || lines[0].trim() != "---" {
-        return Err(VaultdbError::NoFrontmatter("content".into()));
+        // No frontmatter block at all: synthesize an empty one and treat the
+        // entire content as the body. This lets the write primitives
+        // (set_field, add_tag, ...) initialize frontmatter on a bare file
+        // instead of refusing. A file that *opens* a frontmatter block but
+        // never closes it is still rejected as malformed (see below).
+        return Ok((vec!["---", "---"], content));
     }
 
     // Find closing ---
@@ -341,17 +346,13 @@ fn set_field_with_formatted(
     let (fm_lines, body) = split_frontmatter(content)?;
 
     if let Some(key_idx) = find_key_line(&fm_lines, key) {
-        let extent = field_extent(&fm_lines, key_idx);
-        if extent > 1 {
-            return Err(VaultdbError::InvalidFrontmatter {
-                file: String::new(),
-                reason: format!(
-                    "field '{}' is a complex type (list/map). Use --unset first, then re-add.",
-                    key
-                ),
-            });
-        }
-
+        // Flow-style lists (`[a, b]`) and multiline scalars (`|`, `>`) are
+        // intentionally not round-tripped — we won't rewrite those shapes.
+        // Block-style lists/maps, however, can be replaced by a scalar: we
+        // drop the whole field span and write the new single line. This lets
+        // a required field that was stored as the wrong (complex) type be
+        // corrected in one set, without an unset that would transiently
+        // violate a "required" constraint.
         if is_flow_style_list(fm_lines[key_idx]) {
             return Err(VaultdbError::InvalidFrontmatter {
                 file: String::new(),
@@ -372,19 +373,36 @@ fn set_field_with_formatted(
             });
         }
 
-        let old_line = fm_lines[key_idx];
-        let old_value = old_line
-            .find(':')
-            .map(|pos| old_line[pos + 1..].trim())
-            .unwrap_or("")
-            .to_string();
+        let extent = field_extent(&fm_lines, key_idx);
+
+        // Prior value, for the ChangeDescription only. Scalar → the text
+        // after the colon; block list/map → its item lines collapsed.
+        let old_value = if extent == 1 {
+            let old_line = fm_lines[key_idx];
+            old_line
+                .find(':')
+                .map(|pos| old_line[pos + 1..].trim())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            fm_lines[key_idx + 1..key_idx + extent]
+                .iter()
+                .map(|l| l.trim().trim_start_matches('-').trim())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
 
         let new_line = format!("{}: {}", key, formatted_value);
 
+        // Replace the field's entire extent (key line + any block-style
+        // continuation lines) with the single new scalar line.
         let mut result_lines: Vec<String> = Vec::new();
         for (i, line) in fm_lines.iter().enumerate() {
             if i == key_idx {
                 result_lines.push(new_line.clone());
+            } else if i > key_idx && i < key_idx + extent {
+                continue; // dropped: part of the replaced block
             } else {
                 result_lines.push(line.to_string());
             }
@@ -912,9 +930,51 @@ Body text.
     }
 
     #[test]
-    fn set_complex_field_rejected() {
-        let result = set_field(CHINESE_FILE, "kaliplar", "something");
-        assert!(result.is_err());
+    fn set_scalar_over_block_field_replaces() {
+        // A scalar set over a block-style list/map now REPLACES the whole
+        // field span (it used to be refused as a "complex type"). Flow-style
+        // and multiline scalars are still refused — see the dedicated tests.
+        let (result, change) = set_field(CHINESE_FILE, "kaliplar", "something").unwrap();
+        assert!(result.contains("kaliplar: something"), "got:\n{}", result);
+        assert!(!result.contains("快乐")); // old block item gone
+        assert!(!result.contains("kuàilè"));
+        // Neighbouring fields on both sides of the replaced span survive.
+        assert!(result.contains("hsk: 1"));
+        assert!(result.contains("ornekler:"));
+        assert!(result.contains("Body text."));
+        match change {
+            ChangeDescription::SetField {
+                field, new_value, ..
+            } => {
+                assert_eq!(field, "kaliplar");
+                assert_eq!(new_value, "something");
+            }
+            _ => panic!("expected SetField"),
+        }
+    }
+
+    #[test]
+    fn set_field_initializes_frontmatter_on_bare_file() {
+        // A file with no frontmatter block at all gets one synthesized so the
+        // field can be added, rather than the write being refused.
+        let bare = "# Just a heading\n\nSome body text.\n";
+        let (result, _) = set_field(bare, "db-table", "rusen-wiki").unwrap();
+        assert!(result.starts_with("---\n"), "got:\n{}", result);
+        assert!(result.contains("db-table: rusen-wiki"));
+        // Body preserved after the synthesized frontmatter.
+        assert!(result.contains("# Just a heading"));
+        assert!(result.contains("Some body text."));
+        // Frontmatter re-parses and carries the new field.
+        let fm_end = result[4..].find("\n---\n").unwrap() + 4;
+        let fm = &result[4..fm_end];
+        let parsed: serde_yaml::Value = serde_yaml::from_str(fm).unwrap();
+        assert_eq!(
+            parsed
+                .as_mapping()
+                .and_then(|m| m.get("db-table"))
+                .and_then(|v| v.as_str()),
+            Some("rusen-wiki")
+        );
     }
 
     #[test]

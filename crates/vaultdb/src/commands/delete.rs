@@ -27,7 +27,7 @@ pub fn run_delete(
     where_strs: &[String],
     force: bool,
     dry_run: bool,
-    _recursive: bool,
+    recursive: bool,
     _verbose: bool,
 ) -> Result<()> {
     if where_strs.is_empty() {
@@ -40,6 +40,7 @@ pub fn run_delete(
     let filter = build_filter(where_strs)?;
     let plan_report = DeleteBuilder::new(folder, filter.clone())
         .permanent(force)
+        .recursive(recursive)
         .plan(vault)?;
 
     if plan_report.changes.is_empty() {
@@ -109,6 +110,7 @@ pub fn run_delete(
     // Actually apply.
     let exec_report = DeleteBuilder::new(folder, filter)
         .permanent(force)
+        .recursive(recursive)
         .execute(vault)?;
 
     for err in &exec_report.errors {

@@ -191,6 +191,10 @@ pub struct PlanUpdateParams {
     /// Tags to remove from the `tags` list.
     #[serde(default)]
     pub remove_tag: Vec<String>,
+    /// Recurse into subfolders when selecting records to update (default
+    /// false — only files directly in `folder` are considered).
+    #[serde(default)]
+    pub recursive: bool,
 }
 
 /// Parameters for the `plan_delete` tool.
@@ -201,6 +205,9 @@ pub struct PlanDeleteParams {
     /// Permanently delete (default false — moves to `.trash/`).
     #[serde(default)]
     pub permanent: bool,
+    /// Recurse into subfolders when selecting records (default false).
+    #[serde(default)]
+    pub recursive: bool,
 }
 
 /// Parameters for the `plan_move` tool.
@@ -209,6 +216,9 @@ pub struct PlanMoveParams {
     pub folder: String,
     pub to: String,
     pub r#where: String,
+    /// Recurse into subfolders when selecting records (default false).
+    #[serde(default)]
+    pub recursive: bool,
 }
 
 /// Parameters for the `plan_rename` tool.
