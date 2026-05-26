@@ -32,6 +32,7 @@ Frontmatter fields →  Columns
 | `_backlink_count` | integer | Number of incoming links |
 | `_body_length` | integer | Character count of body (after frontmatter) |
 | `_length` | integer | Total file character count |
+| `_body_links` | list | Markdown links `[label](url)` in the body, as `{label, url}` maps (external links; `_links` is the `[[wikilink]]` graph) |
 
 ## Vault auto-detection
 
@@ -69,7 +70,7 @@ FIELD !contains VALUE    # negated
 FIELD startswith VALUE
 FIELD !startswith VALUE
 FIELD endswith VALUE
-FIELD matches REGEX      # regex
+FIELD matches REGEX      # regex (on a list field: true if ANY element matches)
 FIELD !matches REGEX
 FIELD exists             # present and non-null
 FIELD !exists            # absent or null

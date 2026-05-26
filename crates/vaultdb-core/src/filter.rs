@@ -98,6 +98,35 @@ mod tests {
     }
 
     #[test]
+    fn eval_matches_on_list_elementwise() {
+        let r = make_record(vec![(
+            "tags",
+            V::List(vec![
+                V::String("topic/grad-school".into()),
+                V::String("country/usa".into()),
+            ]),
+        )]);
+        assert!(eval(&r, "tags matches \"^topic/\""));
+        assert!(eval(&r, "tags matches \"usa$\""));
+        assert!(!eval(&r, "tags matches \"^japan\""));
+    }
+
+    #[test]
+    fn eval_body_links_matches() {
+        let r = Record {
+            path: PathBuf::from("/vault/notes/U.md"),
+            fields: BTreeMap::new(),
+            raw_content: Some(
+                "---\ndb-table: university\n---\n- [Tuition](https://cs.stanford.edu/tuition)\n"
+                    .to_string(),
+            ),
+        };
+        assert!(eval(&r, "_body_links matches stanford"));
+        assert!(eval(&r, "_body_links matches Tuition"));
+        assert!(!eval(&r, "_body_links matches berkeley"));
+    }
+
+    #[test]
     fn eval_virtual_field_name() {
         let r = Record {
             path: PathBuf::from("/vault/notes/Interstellar.md"),
@@ -419,7 +448,7 @@ fn predicate_uses_links(p: &crate::query::Predicate) -> bool {
 /// raw_content loaded (they re-read from disk on each access), but
 /// loading once upfront is a meaningful win for queries that touch
 /// these on every record.
-pub const BODY_VIRTUAL_FIELDS: &[&str] = &["_body", "_length", "_body_length"];
+pub const BODY_VIRTUAL_FIELDS: &[&str] = &["_body", "_length", "_body_length", "_body_links"];
 
 /// Returns true if any node of `expr` references a body virtual field
 /// or a graph predicate. Both cases need raw_content loaded — graph
@@ -548,6 +577,11 @@ pub fn evaluate_predicate(
         }
         Predicate::Matches { field, regex } => match get(field) {
             Some(Value::String(s)) => regex::Regex::new(regex).is_ok_and(|re| re.is_match(&s)),
+            // Element-wise on lists: true if the regex matches any element's
+            // display string. Lets `_body_links matches "..."` and
+            // `tags matches "^topic/"` work; previously lists were unmatchable.
+            Some(Value::List(list)) => regex::Regex::new(regex)
+                .is_ok_and(|re| list.iter().any(|item| re.is_match(&item.display_value()))),
             _ => false,
         },
         Predicate::StartsWith { field, value } => match get(field) {

@@ -112,6 +112,7 @@ Every record automatically has virtual fields:
 | `_body` | The full body text (everything after the closing `---` of the frontmatter) — use with `contains`, `matches`, etc. for body search |
 | `_length` | Total file size in bytes |
 | `_body_length` | Body length in bytes (excluding frontmatter) |
+| `_body_links` | Markdown links `[label](url)` in the body, as `{label, url}` maps. Query element-wise with `matches`, e.g. `_body_links matches "example\.com"` |
 
 ## Commands
 

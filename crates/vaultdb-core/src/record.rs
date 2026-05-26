@@ -142,6 +142,27 @@ impl Record {
                     .unwrap_or(content);
                 Some(Value::String(body))
             }
+            "_body_links" => {
+                // Markdown links `[label](url)` in the body, as a list of
+                // {label, url} maps. Complements the wiki-link graph
+                // (`_links`, which captures `[[Note]]` internal links); this
+                // captures external markdown links. Query element-wise with
+                // `matches`, e.g. `_body_links matches "cs\\.stanford\\.edu"`.
+                let content = self.load_content();
+                let body = crate::frontmatter::extract_frontmatter(&content)
+                    .map(|(_, body_start)| content[body_start..].to_string())
+                    .unwrap_or(content);
+                let links: Vec<Value> = crate::links::extract_markdown_links(&body)
+                    .into_iter()
+                    .map(|(label, url)| {
+                        let mut m = BTreeMap::new();
+                        m.insert("label".to_string(), Value::String(label));
+                        m.insert("url".to_string(), Value::String(url));
+                        Value::Map(m)
+                    })
+                    .collect();
+                Some(Value::List(links))
+            }
             _ => self.fields.get(key).cloned(),
         }
     }
@@ -471,6 +492,33 @@ mod tests {
             raw_content: None,
         };
         assert_eq!(record.virtual_folder(), "3-Notes");
+    }
+
+    #[test]
+    fn virtual_body_links_extracts_markdown_links() {
+        let record = Record {
+            path: PathBuf::from("/vault/notes/U.md"),
+            fields: BTreeMap::new(),
+            raw_content: Some(
+                "---\ndb-table: university\n---\n## Admissions Links\n\
+                 - [Apply](https://grad.example.edu/apply)\n\
+                 - [Tuition](https://example.edu/tuition)\n"
+                    .to_string(),
+            ),
+        };
+        let v = record.get("_body_links", Path::new("/vault")).unwrap();
+        let Value::List(items) = v else {
+            panic!("expected a list");
+        };
+        assert_eq!(items.len(), 2);
+        let Value::Map(first) = &items[0] else {
+            panic!("expected a map");
+        };
+        assert_eq!(first.get("label"), Some(&Value::String("Apply".into())));
+        assert_eq!(
+            first.get("url"),
+            Some(&Value::String("https://grad.example.edu/apply".into()))
+        );
     }
 
     #[test]

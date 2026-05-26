@@ -5,6 +5,20 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.0] — Queryable body links: `_body_links` + element-wise list `matches`
+
+### Added
+
+- **`_body_links` virtual field.** Markdown links `[label](url)` in a note's
+  body, exposed as a list of `{label, url}` maps — complements the wiki-link
+  graph (`_links`, which captures `[[Note]]` links). Triggers body loading like
+  `_body`.
+- **`matches` works element-wise on list fields.** `FIELD matches REGEX` now
+  returns true if the regex matches *any* element of a list (previously lists
+  were unmatchable). Enables `_body_links matches "cs\.stanford\.edu"` and
+  `tags matches "^topic/"`. Non-breaking — list `matches` was always `false`
+  before.
+
 ## [1.4.0] — Writer initializes & retypes frontmatter; opt-in recursive mutations
 
 ### Added

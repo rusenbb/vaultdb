@@ -43,6 +43,10 @@ static FENCED_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)```.*
 
 static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]+`").unwrap());
 
+/// Markdown inline link `[label](url)`. Used by [`extract_markdown_links`].
+static MD_LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
+
 /// Strip code blocks (fenced and inline) from content to avoid false link extraction.
 fn strip_code_blocks(content: &str) -> String {
     let without_fenced = FENCED_CODE_RE.replace_all(content, "");
@@ -67,6 +71,24 @@ pub fn extract_links(content: &str) -> BTreeSet<String> {
         links.insert(link);
     }
     links
+}
+
+/// Extract markdown links `[label](url)` from `content` as `(label, url)`
+/// pairs, in document order. Strips code blocks first (so links inside
+/// fenced/inline code are ignored) and skips image embeds (`![alt](url)`).
+/// Wiki-links `[[Note]]` are never matched — they have no `](`.
+pub fn extract_markdown_links(content: &str) -> Vec<(String, String)> {
+    let cleaned = strip_code_blocks(content);
+    let mut out = Vec::new();
+    for cap in MD_LINK_RE.captures_iter(&cleaned) {
+        let whole = cap.get(0).expect("capture group 0 always present");
+        // Skip the `[label](url)` that belongs to an image embed `![alt](url)`.
+        if cleaned[..whole.start()].ends_with('!') {
+            continue;
+        }
+        out.push((cap[1].trim().to_string(), cap[2].trim().to_string()));
+    }
+    out
 }
 
 /// Extract links from a record. Requires raw_content to be loaded.
@@ -384,6 +406,27 @@ mod tests {
         let links = extract_links(content);
         assert!(links.contains("RealLink"));
         assert!(!links.contains("NotALink"));
+    }
+
+    #[test]
+    fn extract_markdown_links_basic() {
+        let md = "See [Docs](https://example.com/docs) and [Home](https://example.com).";
+        assert_eq!(
+            extract_markdown_links(md),
+            vec![
+                ("Docs".to_string(), "https://example.com/docs".to_string()),
+                ("Home".to_string(), "https://example.com".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_markdown_links_skips_images_wikilinks_and_code() {
+        let md = "![pic](https://img.test/a.png) [Real](https://real.test) [[WikiNote]] `[Code](https://code.test)`";
+        assert_eq!(
+            extract_markdown_links(md),
+            vec![("Real".to_string(), "https://real.test".to_string())]
+        );
     }
 
     #[test]
