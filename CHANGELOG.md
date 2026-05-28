@@ -5,6 +5,41 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.1] — Typed ORM body surface + test coverage backfill
+
+### Added
+
+- **`orm::Update<T>` now exposes body ops.** `.set_body(text)`,
+  `.append_body(text)`, `.clear_body()`, `.body_separator(sep)` —
+  the typed wrapper now mirrors the v1.6.0 core surface so callers
+  that go through `Query::<T>::update()` aren't forced to drop down
+  to `vaultdb-core` to use the new feature.
+- **`orm::Create<T>::body(text)`** — same treatment for the typed
+  create wrapper. Overrides the template's body and the default
+  `# {name}` placeholder.
+
+### Tests
+
+- Seven coverage gaps from the 1.6.0 diagnosis are now pinned: no-op
+  body set is skipped (mtime-churn defense), append touches every
+  matching record (per-record loop isolation), CRLF line endings on
+  frontmatter survive a body write, appended `\n---\n` section break
+  doesn't break re-parse, `plan()` description surfaces body ops,
+  schema attached + body-only change passes validation, and the
+  documented `clear → set → append` apply order holds regardless of
+  builder call order.
+- Three ORM body integration tests covering `Update<T>::set_body /
+  append_body + body_separator / clear_body` and `Create<T>::body`.
+
+### Docs
+
+- CLI help for `--set-body`, `--append-body`, and `create --body`
+  now states explicitly that body text is taken verbatim (escape
+  sequences NOT interpreted). Suggests shell ANSI-C quoting
+  (`$'...'`) when literal newlines are needed. Only
+  `--body-separator` interprets escapes — clarifying the asymmetry
+  surfaced by the v1.6.0 review.
+
 ## [1.6.0] — Body writes: append / overwrite / clear; create with body
 
 ### Added

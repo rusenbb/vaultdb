@@ -188,7 +188,9 @@ pub enum Command {
 
         /// Body content for the new note. Overrides the template's body
         /// (frontmatter is still merged) and the default "# {name}"
-        /// placeholder. Written verbatim.
+        /// placeholder. Written verbatim — escape sequences are NOT
+        /// interpreted; use shell ANSI-C quoting (`$'...'`) if you
+        /// need literal newlines.
         #[arg(long)]
         body: Option<String>,
     },
@@ -232,12 +234,16 @@ pub enum Command {
         remove_tag: Vec<String>,
 
         /// Replace the body with this text (everything after the
-        /// closing `---` of the frontmatter). Written verbatim.
+        /// closing `---` of the frontmatter). Written verbatim —
+        /// escape sequences are NOT interpreted; use shell ANSI-C
+        /// quoting (`$'...'`) if you need literal newlines.
         #[arg(long = "set-body")]
         set_body: Option<String>,
 
         /// Append this text to the existing body, joined by
-        /// `--body-separator` (default `\n`). Repeatable.
+        /// `--body-separator` (default `\n`). Repeatable. Body text
+        /// is written verbatim — escape sequences are NOT
+        /// interpreted (only `--body-separator` is).
         #[arg(long = "append-body", num_args = 1)]
         append_body: Vec<String>,
 

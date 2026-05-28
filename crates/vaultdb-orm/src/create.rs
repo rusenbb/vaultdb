@@ -67,6 +67,15 @@ impl<'v, T: Note> Create<'v, T> {
         self
     }
 
+    /// Explicit body content for the new note. Overrides the
+    /// template's body (if any) and the default `# {name}`
+    /// placeholder. Written verbatim. See
+    /// [`vaultdb_core::CreateBuilder::body`].
+    pub fn body(mut self, text: impl Into<String>) -> Self {
+        self.inner = self.inner.body(text);
+        self
+    }
+
     /// Set a frontmatter field by typed accessor. Use this for fields
     /// declared on `T` — typos become compile errors.
     pub fn set(mut self, field: FieldRef, value: impl Into<Value>) -> Self {

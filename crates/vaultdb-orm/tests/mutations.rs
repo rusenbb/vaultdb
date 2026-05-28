@@ -100,6 +100,73 @@ fn execute_writes_and_skips_records_outside_filter() {
 }
 
 #[test]
+fn body_set_overwrites_via_typed_update() {
+    // Smoke test the body surface on the typed Update wrapper —
+    // confirms the v1.6.0+ body API is reachable through orm::Update<T>
+    // and that the filter still scopes the write (Beta untouched).
+    let (dir, vault) = fixture();
+
+    let report = Query::<Paper>::new(&vault)
+        .filter(Paper::title().eq("Alpha"))
+        .update()
+        .unwrap()
+        .set_body("Replaced body.\n")
+        .execute()
+        .unwrap();
+    assert_eq!(report.changes.len(), 1);
+    assert!(report.errors.is_empty());
+
+    let alpha = fs::read_to_string(dir.path().join("notes/Alpha.md")).unwrap();
+    assert!(alpha.ends_with("---\nReplaced body.\n"), "got:\n{}", alpha);
+    assert!(!alpha.contains("body\n"), "old body must be gone");
+
+    let beta = fs::read_to_string(dir.path().join("notes/Beta.md")).unwrap();
+    assert!(
+        beta.ends_with("---\nbody\n"),
+        "Beta body untouched: {}",
+        beta
+    );
+}
+
+#[test]
+fn body_append_with_blank_line_separator_via_typed_update() {
+    // body_separator + append_body together — exercises both new
+    // methods through the typed wrapper, and confirms the separator
+    // override actually reaches the core builder.
+    let (dir, vault) = fixture();
+
+    Query::<Paper>::new(&vault)
+        .filter(Paper::title().eq("Alpha"))
+        .update()
+        .unwrap()
+        .body_separator("\n\n")
+        .append_body("Notes section.")
+        .execute()
+        .unwrap();
+
+    let alpha = fs::read_to_string(dir.path().join("notes/Alpha.md")).unwrap();
+    assert!(alpha.ends_with("body\n\nNotes section."), "got:\n{}", alpha);
+}
+
+#[test]
+fn body_clear_via_typed_update_keeps_frontmatter() {
+    let (dir, vault) = fixture();
+
+    Query::<Paper>::new(&vault)
+        .filter(Paper::title().eq("Alpha"))
+        .update()
+        .unwrap()
+        .clear_body()
+        .execute()
+        .unwrap();
+
+    let alpha = fs::read_to_string(dir.path().join("notes/Alpha.md")).unwrap();
+    assert!(alpha.contains("year: 2018"), "frontmatter preserved");
+    assert!(!alpha.contains("body"), "body cleared: {}", alpha);
+    assert!(alpha.ends_with("---\n"));
+}
+
+#[test]
 fn discriminator_protects_other_record_kinds() {
     // Gamma is type/concept, not type/paper. A filter `year = 2024 &
     // discriminator(type/paper)` must not touch it.

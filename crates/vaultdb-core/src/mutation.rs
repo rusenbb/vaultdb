@@ -1728,6 +1728,265 @@ mod tests {
     }
 
     #[test]
+    fn update_builder_set_body_to_same_text_is_skipped() {
+        // The skip-noop branch (`content != original_content`) must apply
+        // to body ops too — setting the body to what's already on disk
+        // is not a change and must not produce a write or a report
+        // entry.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/a.md"),
+            "---\nstatus: x\n---\nExact body.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("a".into()),
+        });
+        let report = UpdateBuilder::new("notes", filter)
+            .set_body("Exact body.\n")
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(report.errors.len(), 0);
+        assert_eq!(
+            report.changes.len(),
+            0,
+            "set_body with the existing content must not be reported as a change"
+        );
+    }
+
+    #[test]
+    fn update_builder_append_body_touches_every_matching_record() {
+        // The per-record loop must apply the body op independently to
+        // each match. A bug that leaked state across iterations would
+        // only update the first or last file. Three matches, one append
+        // each.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        for name in ["a", "b", "c"] {
+            fs::write(
+                dir.path().join(format!("notes/{}.md", name)),
+                format!("---\nstatus: open\n---\nbody {}.\n", name),
+            )
+            .unwrap();
+        }
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "status".into(),
+            value: Value::String("open".into()),
+        });
+        let report = UpdateBuilder::new("notes", filter)
+            .append_body("[done]")
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(report.errors.len(), 0);
+        assert_eq!(report.changes.len(), 3, "all three records must be touched");
+
+        for name in ["a", "b", "c"] {
+            let after = fs::read_to_string(dir.path().join(format!("notes/{}.md", name))).unwrap();
+            assert!(
+                after.ends_with(&format!("body {}.\n[done]", name)),
+                "{} got: {}",
+                name,
+                after
+            );
+        }
+    }
+
+    #[test]
+    fn update_builder_body_op_preserves_crlf_line_endings() {
+        // A Windows-authored file with CRLF line endings round-trips
+        // through a body op preserving the CRLF style on the
+        // frontmatter portion. The body itself is written verbatim, so
+        // the caller controls its line ending — we only check the
+        // frontmatter region's endings are preserved.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        let crlf = "---\r\nstatus: x\r\n---\r\nOld.\r\n";
+        fs::write(dir.path().join("notes/win.md"), crlf).unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("win".into()),
+        });
+        UpdateBuilder::new("notes", filter)
+            .set_body("New body.")
+            .execute(&vault)
+            .unwrap();
+
+        let after = fs::read_to_string(dir.path().join("notes/win.md")).unwrap();
+        assert!(
+            after.starts_with("---\r\nstatus: x\r\n---\r\n"),
+            "frontmatter CRLFs lost: {:?}",
+            after
+        );
+        assert!(after.ends_with("New body."));
+    }
+
+    #[test]
+    fn update_builder_appended_body_with_dashes_still_reparses() {
+        // Append a section break that visually resembles a YAML
+        // frontmatter delimiter (`\n---\n`). The file must still
+        // re-parse with the original frontmatter intact — the parser
+        // only inspects the leading block, so this is the invariant
+        // we're pinning.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/n.md"),
+            "---\nstatus: active\n---\nIntro.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("n".into()),
+        });
+        UpdateBuilder::new("notes", filter)
+            .body_separator("\n")
+            .append_body("---\nNext section.")
+            .execute(&vault)
+            .unwrap();
+
+        let records = vault
+            .load_records(&dir.path().join("notes"), false, false)
+            .unwrap()
+            .records;
+        let n = records.iter().find(|r| r.path.ends_with("n.md")).unwrap();
+        assert_eq!(
+            n.fields.get("status"),
+            Some(&Value::String("active".into()))
+        );
+    }
+
+    #[test]
+    fn update_builder_plan_describes_body_ops() {
+        // plan() must surface each body op in the PlannedChange's
+        // human-readable description. Catches a regression where a
+        // body op happened on disk but wasn't reported to the caller.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/a.md"),
+            "---\nstatus: x\n---\nOriginal body.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("a".into()),
+        });
+        let plan = UpdateBuilder::new("notes", filter)
+            .append_body("Tail.")
+            .plan(&vault)
+            .unwrap();
+        assert_eq!(plan.changes.len(), 1);
+        assert!(
+            plan.changes[0].description.contains("append body"),
+            "description must mention the body op: {:?}",
+            plan.changes[0].description
+        );
+        let still = fs::read_to_string(dir.path().join("notes/a.md")).unwrap();
+        assert!(still.ends_with("Original body.\n"));
+    }
+
+    #[test]
+    fn update_builder_body_only_change_passes_schema() {
+        // With a schema attached but only a body op requested, the
+        // post-update frontmatter is identical to the existing
+        // frontmatter — schema validation must pass and the write
+        // must land. Defends against a future refactor that runs the
+        // schema check too eagerly for body-only changes.
+        use std::fs;
+        let dir = vault_with_obsidian();
+        fs::create_dir_all(dir.path().join("Notes/movie")).unwrap();
+        fs::write(
+            dir.path().join("Notes/movie/Dune.md"),
+            "---\ndb-table: movie\ndirector: DV\nstatus: to-watch\nyear: 2021\n---\nReview pending.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(crate::query::Predicate::Equals {
+            field: "director".into(),
+            value: Value::String("DV".into()),
+        });
+        let report = UpdateBuilder::new("Notes/movie", filter)
+            .append_body("Now watched.")
+            .with_vault_schema(vault_schema_movies())
+            .execute(&vault)
+            .unwrap();
+        assert!(
+            report.errors.is_empty(),
+            "schema must pass on body-only change: {:?}",
+            report.errors
+        );
+        assert_eq!(report.changes.len(), 1);
+        let after = fs::read_to_string(dir.path().join("Notes/movie/Dune.md")).unwrap();
+        assert!(after.contains("Review pending.\nNow watched."));
+        assert!(after.contains("director: DV"));
+    }
+
+    #[test]
+    fn update_builder_clear_set_append_apply_in_documented_order() {
+        // Documented apply order: clear → set → append. So
+        // `.clear_body().set_body("X").append_body("Y")` produces
+        // `X{sep}Y`, regardless of the call order on the builder.
+        // This test pins the contract so a future reorder of the
+        // compute() loop has to consciously update it.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/a.md"),
+            "---\nstatus: x\n---\nGarbage that should disappear.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("a".into()),
+        });
+        // Call append BEFORE set/clear to prove call order doesn't
+        // matter — apply order does.
+        UpdateBuilder::new("notes", filter)
+            .append_body("Y")
+            .set_body("X")
+            .clear_body()
+            .execute(&vault)
+            .unwrap();
+
+        let after = fs::read_to_string(dir.path().join("notes/a.md")).unwrap();
+        assert!(after.ends_with("---\nX\nY"), "got: {:?}", after);
+        assert!(!after.contains("Garbage"));
+    }
+
+    #[test]
     fn update_builder_chains() {
         let filter = Expr::Predicate(Predicate::Equals {
             field: "status".into(),

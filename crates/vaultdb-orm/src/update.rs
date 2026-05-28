@@ -4,8 +4,9 @@
 //! query's filter (which must include at least one user-added
 //! `.filter(...)`, not only the model discriminator) and exposes
 //! `.set(FieldRef, value)`, `.unset(FieldRef)`, `.add_tag`,
-//! `.remove_tag`, and the plan/execute pair the underlying core API
-//! provides.
+//! `.remove_tag`, the body ops (`.set_body`, `.append_body`,
+//! `.clear_body`, `.body_separator`), and the plan/execute pair the
+//! underlying core API provides.
 //!
 //! Like the core builder, mutations only happen on `.execute(...)`;
 //! `.plan(...)` returns a read-only [`MutationReport`] preview.
@@ -76,6 +77,36 @@ impl<'v, T: Note> Update<'v, T> {
     /// Remove `tag` from the `tags` list of every matching record.
     pub fn remove_tag(mut self, tag: impl Into<String>) -> Self {
         self.inner = self.inner.remove_tag(tag);
+        self
+    }
+
+    /// Replace the body of every matching record with `text`. Written
+    /// verbatim. See [`vaultdb_core::UpdateBuilder::set_body`].
+    pub fn set_body(mut self, text: impl Into<String>) -> Self {
+        self.inner = self.inner.set_body(text);
+        self
+    }
+
+    /// Append `text` to the body of every matching record, joined by
+    /// the configured separator (default `"\n"`). Multiple calls
+    /// accumulate. See [`vaultdb_core::UpdateBuilder::append_body`].
+    pub fn append_body(mut self, text: impl Into<String>) -> Self {
+        self.inner = self.inner.append_body(text);
+        self
+    }
+
+    /// Clear the body of every matching record (frontmatter is
+    /// preserved). See [`vaultdb_core::UpdateBuilder::clear_body`].
+    pub fn clear_body(mut self) -> Self {
+        self.inner = self.inner.clear_body();
+        self
+    }
+
+    /// Override the separator between existing body and each
+    /// appended chunk. See
+    /// [`vaultdb_core::UpdateBuilder::body_separator`].
+    pub fn body_separator(mut self, sep: impl Into<String>) -> Self {
+        self.inner = self.inner.body_separator(sep);
         self
     }
 

@@ -153,6 +153,28 @@ fn typed_create_plan_returns_content_without_writing() {
     assert!(content.unwrap().contains("status: to-watch"));
 }
 
+#[test]
+fn typed_create_with_explicit_body_overrides_default_placeholder() {
+    // body() on the typed Create wrapper replaces the default
+    // `# {name}` placeholder. Confirms the v1.6.1 ORM body() method
+    // routes through to CoreCreateBuilder::body.
+    let (dir, vault) = vault();
+    Create::<Movie>::new(&vault, "Dune")
+        .set(Movie::director(), "DV")
+        .set(Movie::year(), 2021_i64)
+        .body("Hand-rolled body line.\n")
+        .execute()
+        .unwrap();
+    let content = fs::read_to_string(dir.path().join("Notes/movie/Dune.md")).unwrap();
+    assert!(content.contains("Hand-rolled body line."));
+    // The default `# Dune` placeholder must NOT appear.
+    assert!(
+        !content.contains("# Dune"),
+        "default placeholder leaked through: {}",
+        content
+    );
+}
+
 // Phase 6: when `#[note(collection = "...")]` is set AND the vault has
 // a vaultdb-schema.yaml declaring that collection, Create<T> attaches
 // it automatically. No explicit .with_schema() call required.
