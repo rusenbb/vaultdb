@@ -60,6 +60,22 @@ fn build_update(vault: &Vault, params: PlanUpdateParams) -> Result<UpdateBuilder
     for tag in params.remove_tag {
         builder = builder.remove_tag(tag);
     }
+
+    // Body ops. Configure separator before any append so the override
+    // applies to every append in this call.
+    if let Some(sep) = params.body_separator {
+        builder = builder.body_separator(sep);
+    }
+    if params.clear_body {
+        builder = builder.clear_body();
+    }
+    if let Some(text) = params.set_body {
+        builder = builder.set_body(text);
+    }
+    for text in params.append_body {
+        builder = builder.append_body(text);
+    }
+
     if let Some(vs) = load_vault_schema_opt(vault)? {
         builder = builder.with_vault_schema(vs);
     }
@@ -223,6 +239,10 @@ fn build_create(vault: &Vault, params: PlanCreateParams) -> Result<CreateBuilder
 
     if let Some(t) = params.template {
         builder = builder.template(t);
+    }
+
+    if let Some(b) = params.body {
+        builder = builder.body(b);
     }
 
     for (field, json_value) in params.set {

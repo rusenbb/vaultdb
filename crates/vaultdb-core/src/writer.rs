@@ -24,6 +24,25 @@ pub enum ChangeDescription {
     RemoveTag {
         tag: String,
     },
+    /// Replace the entire body (everything after the closing `---` of the
+    /// frontmatter). `old_len` / `new_len` are byte counts, surfaced so
+    /// the report can say "shrank body from 1.2k → 80 bytes" without
+    /// echoing arbitrary user prose.
+    SetBody {
+        old_len: usize,
+        new_len: usize,
+    },
+    /// Append text to the existing body (separated by a caller-chosen
+    /// separator, default `"\n"`). `added_len` is the byte count of the
+    /// appended text (excluding separator) for the same reason.
+    AppendBody {
+        added_len: usize,
+    },
+    /// Clear the body entirely — semantic shorthand for "set to empty".
+    /// Carries `old_len` so an audit log can record what was removed.
+    ClearBody {
+        old_len: usize,
+    },
 }
 
 impl std::fmt::Display for ChangeDescription {
@@ -39,6 +58,15 @@ impl std::fmt::Display for ChangeDescription {
             }
             ChangeDescription::AddTag { tag } => write!(f, "add tag: {}", tag),
             ChangeDescription::RemoveTag { tag } => write!(f, "remove tag: {}", tag),
+            ChangeDescription::SetBody { old_len, new_len } => {
+                write!(f, "set body ({} → {} bytes)", old_len, new_len)
+            }
+            ChangeDescription::AppendBody { added_len } => {
+                write!(f, "append body (+{} bytes)", added_len)
+            }
+            ChangeDescription::ClearBody { old_len } => {
+                write!(f, "clear body (was {} bytes)", old_len)
+            }
         }
     }
 }
@@ -672,6 +700,79 @@ pub fn remove_tag(content: &str, tag: &str) -> Result<(String, ChangeDescription
     Ok((reassemble(&result_lines, body, content), change))
 }
 
+// ── Body mutations ─────────────────────────────────────────────────────────
+//
+// `set_body`, `append_body`, and `clear_body` operate on the body
+// region — everything after the closing `---` of the frontmatter.
+// They preserve the frontmatter byte-for-byte and the file's
+// line-ending style. Bare files (no frontmatter delimiters) get an
+// empty frontmatter synthesized, matching `set_field`'s behaviour;
+// note that for `set_body` this means the file's pre-existing
+// non-frontmatter content is treated as the body and will be
+// replaced. In practice the public mutation API only reaches files
+// that already parsed as records (i.e. had valid frontmatter), so
+// the synthesise path is mostly exercised by tests.
+
+/// Replace the body with `new_body`. Frontmatter is preserved byte-for-byte.
+///
+/// `new_body` is written verbatim — no trailing newline auto-append, no
+/// leading whitespace stripping. Callers that want a trailing newline
+/// should include it in `new_body`.
+pub fn set_body(content: &str, new_body: &str) -> Result<(String, ChangeDescription)> {
+    let (fm_lines, old_body) = split_frontmatter(content)?;
+    let fm_owned: Vec<String> = fm_lines.iter().map(|s| s.to_string()).collect();
+    let change = ChangeDescription::SetBody {
+        old_len: old_body.len(),
+        new_len: new_body.len(),
+    };
+    Ok((reassemble(&fm_owned, new_body, content), change))
+}
+
+/// Clear the body entirely. Equivalent to [`set_body`] with `""` but
+/// surfaces a distinct [`ChangeDescription::ClearBody`] so audit logs
+/// and dry-run reports can call out the destructive intent.
+pub fn clear_body(content: &str) -> Result<(String, ChangeDescription)> {
+    let (fm_lines, old_body) = split_frontmatter(content)?;
+    let fm_owned: Vec<String> = fm_lines.iter().map(|s| s.to_string()).collect();
+    let change = ChangeDescription::ClearBody {
+        old_len: old_body.len(),
+    };
+    Ok((reassemble(&fm_owned, "", content), change))
+}
+
+/// Append `text` to the end of the body, joined by `separator`.
+///
+/// `separator` is inserted only when the existing body is non-empty.
+/// When the existing body ends with the same trailing newline(s) as
+/// `separator`, those trailing newlines are trimmed before joining so
+/// the result doesn't accumulate stacked blank lines on repeated
+/// appends. Default callers use `"\n"`, which yields one newline
+/// between old and new content regardless of the original body's
+/// trailing-newline state.
+pub fn append_body(
+    content: &str,
+    text: &str,
+    separator: &str,
+) -> Result<(String, ChangeDescription)> {
+    let (fm_lines, old_body) = split_frontmatter(content)?;
+    let fm_owned: Vec<String> = fm_lines.iter().map(|s| s.to_string()).collect();
+
+    let new_body = if old_body.is_empty() {
+        text.to_string()
+    } else {
+        // Strip any trailing `\n` / `\r\n` runs from the existing body so
+        // we don't end up with a blank line between old and new content
+        // when the file already ends with a newline (the common case).
+        let trimmed = old_body.trim_end_matches(['\n', '\r']);
+        format!("{}{}{}", trimmed, separator, text)
+    };
+
+    let change = ChangeDescription::AppendBody {
+        added_len: text.len(),
+    };
+    Ok((reassemble(&fm_owned, &new_body, content), change))
+}
+
 /// Reassemble a file from frontmatter lines and body, preserving the original line ending style.
 fn reassemble(fm_lines: &[String], body: &str, original: &str) -> String {
     let line_ending = if original.contains("\r\n") {
@@ -1250,6 +1351,126 @@ Body text.
             "preformatted value was double-quoted; got:\n{}",
             out
         );
+    }
+
+    // ── Body mutations ───────────────────────────────────────────────────
+
+    #[test]
+    fn set_body_replaces_existing_body() {
+        let (result, change) = set_body(MOVIE_FILE, "New body content.\n").unwrap();
+        // Frontmatter intact.
+        assert!(result.contains("director: Sam Mendes"));
+        assert!(result.contains("status: to-watch"));
+        // Old body gone, new body present.
+        assert!(!result.contains("Part of [[Watchlist]]"));
+        assert!(result.contains("New body content."));
+        // Body sits immediately after the closing `---\n`.
+        assert!(result.ends_with("---\nNew body content.\n"));
+        match change {
+            ChangeDescription::SetBody { new_len, .. } => assert_eq!(new_len, 18),
+            other => panic!("expected SetBody, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_body_writes_verbatim_no_trailing_newline_added() {
+        // Caller controls the trailing-newline behaviour. If they pass a
+        // body without `\n`, the file ends without one.
+        let (result, _) = set_body(MOVIE_FILE, "no newline").unwrap();
+        assert!(result.ends_with("---\nno newline"));
+    }
+
+    #[test]
+    fn set_body_on_frontmatter_only_file() {
+        // File with frontmatter and empty body — set_body fills it in.
+        let fm_only = "---\nstatus: x\n---\n";
+        let (result, _) = set_body(fm_only, "Hello.\n").unwrap();
+        assert_eq!(result, "---\nstatus: x\n---\nHello.\n");
+    }
+
+    #[test]
+    fn set_body_on_bare_file_synthesizes_frontmatter() {
+        // No frontmatter delimiters at all — split_frontmatter synthesizes
+        // empty frontmatter and treats the original content as body.
+        // set_body then replaces that body.
+        let bare = "Just a bare note.\n";
+        let (result, change) = set_body(bare, "Replaced.\n").unwrap();
+        assert!(result.starts_with("---\n---\n"));
+        assert!(result.ends_with("Replaced.\n"));
+        assert!(!result.contains("Just a bare note"));
+        match change {
+            ChangeDescription::SetBody { old_len, new_len } => {
+                assert_eq!(old_len, bare.len());
+                assert_eq!(new_len, "Replaced.\n".len());
+            }
+            other => panic!("expected SetBody, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn clear_body_keeps_frontmatter_and_drops_body() {
+        let (result, change) = clear_body(MOVIE_FILE).unwrap();
+        assert!(result.contains("director: Sam Mendes"));
+        assert!(!result.contains("Part of [[Watchlist]]"));
+        // Body region is empty: ends with the closing `---\n`.
+        assert!(result.ends_with("---\n"));
+        match change {
+            ChangeDescription::ClearBody { old_len } => assert!(old_len > 0),
+            other => panic!("expected ClearBody, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_body_on_existing_body_uses_separator() {
+        // MOVIE_FILE body is "\nPart of [[Watchlist]]\n" — note the leading
+        // blank line is part of the body. Appending "next" with "\n"
+        // separator strips the trailing newline from the existing body,
+        // then joins.
+        let (result, change) = append_body(MOVIE_FILE, "Next line.", "\n").unwrap();
+        assert!(result.contains("Part of [[Watchlist]]"));
+        assert!(result.ends_with("Part of [[Watchlist]]\nNext line."));
+        match change {
+            ChangeDescription::AppendBody { added_len } => assert_eq!(added_len, 10),
+            other => panic!("expected AppendBody, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_body_with_custom_separator() {
+        // Pass a blank-line separator. Result should have one blank line
+        // between old and new content.
+        let fm_with_body = "---\nstatus: x\n---\nFirst.\n";
+        let (result, _) = append_body(fm_with_body, "Second.", "\n\n").unwrap();
+        assert!(result.ends_with("First.\n\nSecond."));
+    }
+
+    #[test]
+    fn append_body_on_empty_body_skips_separator() {
+        // Empty body → no separator added; appended text becomes the body.
+        let fm_only = "---\nstatus: x\n---\n";
+        let (result, _) = append_body(fm_only, "First line.", "\n").unwrap();
+        assert_eq!(result, "---\nstatus: x\n---\nFirst line.");
+    }
+
+    #[test]
+    fn append_body_idempotent_against_trailing_newlines() {
+        // Repeatedly appending with "\n" separator should not accumulate
+        // blank lines, even if each append leaves a trailing newline.
+        let start = "---\n---\n";
+        let (r1, _) = append_body(start, "a\n", "\n").unwrap();
+        let (r2, _) = append_body(&r1, "b\n", "\n").unwrap();
+        let (r3, _) = append_body(&r2, "c\n", "\n").unwrap();
+        assert_eq!(r3, "---\n---\na\nb\nc\n");
+    }
+
+    #[test]
+    fn append_body_on_bare_file_appends_after_original() {
+        // Bare file — synthesized fm, body is the original content.
+        // Append adds to the end of that content.
+        let bare = "Existing.\n";
+        let (result, _) = append_body(bare, "More.", "\n").unwrap();
+        assert!(result.starts_with("---\n---\n"));
+        assert!(result.ends_with("Existing.\nMore."));
     }
 
     #[test]

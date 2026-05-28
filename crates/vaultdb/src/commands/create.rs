@@ -18,12 +18,17 @@ pub fn run_create(
     name: &str,
     template: Option<&str>,
     set_args: &[String],
+    body: Option<&str>,
     dry_run: bool,
 ) -> Result<()> {
     let mut builder = CreateBuilder::new(folder, name);
 
     if let Some(t) = template {
         builder = builder.template(t);
+    }
+
+    if let Some(b) = body {
+        builder = builder.body(b);
     }
 
     for s in set_args {

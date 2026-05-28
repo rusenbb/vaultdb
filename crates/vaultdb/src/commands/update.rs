@@ -11,6 +11,37 @@ pub enum UpdateOp {
     Unset { field: String },
     AddTag { tag: String },
     RemoveTag { tag: String },
+    SetBody { text: String },
+    AppendBody { text: String },
+    ClearBody,
+}
+
+/// Translate the common backslash escapes (`\n`, `\r`, `\t`, `\\`) in a
+/// user-supplied separator string into their literal bytes. Shell quoting
+/// makes literal newlines awkward to pass on the command line, so we
+/// accept the escaped form and unescape here. Unknown escapes pass
+/// through untouched (e.g. `\x` stays `\x`) — keeps the rule simple.
+pub fn unescape_separator(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Parse --set arguments ("FIELD=VALUE") and the other flags into UpdateOps.
@@ -19,6 +50,9 @@ pub fn parse_operations(
     unset: &[String],
     add_tag: &[String],
     remove_tag: &[String],
+    set_body: Option<&str>,
+    append_body: &[String],
+    clear_body: bool,
 ) -> Result<Vec<UpdateOp>> {
     let mut ops = Vec::new();
 
@@ -50,19 +84,39 @@ pub fn parse_operations(
         });
     }
 
+    if clear_body {
+        ops.push(UpdateOp::ClearBody);
+    }
+
+    if let Some(text) = set_body {
+        ops.push(UpdateOp::SetBody {
+            text: text.to_string(),
+        });
+    }
+
+    for text in append_body {
+        ops.push(UpdateOp::AppendBody {
+            text: text.to_string(),
+        });
+    }
+
     if ops.is_empty() {
-        anyhow::bail!("no operations specified. Use --set, --unset, --add-tag, or --remove-tag");
+        anyhow::bail!(
+            "no operations specified. Use --set, --unset, --add-tag, --remove-tag, --set-body, --append-body, or --clear-body"
+        );
     }
 
     Ok(ops)
 }
 
 /// Run the `update` command.
+#[allow(clippy::too_many_arguments)]
 pub fn run_update(
     vault: &Vault,
     folder: &str,
     where_strs: &[String],
     ops: &[UpdateOp],
+    body_separator: Option<&str>,
     dry_run: bool,
     recursive: bool,
     _verbose: bool,
@@ -87,12 +141,18 @@ pub fn run_update(
     };
 
     let mut builder = UpdateBuilder::new(folder, filter).recursive(recursive);
+    if let Some(sep) = body_separator {
+        builder = builder.body_separator(sep);
+    }
     for op in ops {
         builder = match op {
             UpdateOp::Set { field, value } => builder.set(field, Value::parse_scalar(value)),
             UpdateOp::Unset { field } => builder.unset(field),
             UpdateOp::AddTag { tag } => builder.add_tag(tag),
             UpdateOp::RemoveTag { tag } => builder.remove_tag(tag),
+            UpdateOp::SetBody { text } => builder.set_body(text),
+            UpdateOp::AppendBody { text } => builder.append_body(text),
+            UpdateOp::ClearBody => builder.clear_body(),
         };
     }
 
@@ -155,5 +215,32 @@ pub(crate) fn print_report(
             "\n{}",
             format!("{} file(s) {}", report.changes.len(), verb_past).green()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unescape_separator;
+
+    #[test]
+    fn unescape_common_sequences() {
+        assert_eq!(unescape_separator("\\n"), "\n");
+        assert_eq!(unescape_separator("\\n\\n"), "\n\n");
+        assert_eq!(unescape_separator("\\t"), "\t");
+        assert_eq!(unescape_separator("\\r\\n"), "\r\n");
+        assert_eq!(unescape_separator("\\\\"), "\\");
+    }
+
+    #[test]
+    fn unescape_unknown_escape_passes_through() {
+        // `\x` is not a recognised escape — leave it as-is rather than
+        // silently dropping the backslash.
+        assert_eq!(unescape_separator("\\x"), "\\x");
+    }
+
+    #[test]
+    fn unescape_plain_string_unchanged() {
+        assert_eq!(unescape_separator("---"), "---");
+        assert_eq!(unescape_separator(""), "");
     }
 }

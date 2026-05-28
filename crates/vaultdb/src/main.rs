@@ -125,12 +125,14 @@ fn run() -> Result<()> {
             name,
             template,
             set,
+            body,
         } => commands::create::run_create(
             &vault,
             folder,
             name,
             template.as_deref(),
             set,
+            body.as_deref(),
             cli.dry_run,
         ),
 
@@ -154,13 +156,29 @@ fn run() -> Result<()> {
             unset,
             add_tag,
             remove_tag,
+            set_body,
+            append_body,
+            clear_body,
+            body_separator,
         } => {
-            let ops = commands::update::parse_operations(set, unset, add_tag, remove_tag)?;
+            let ops = commands::update::parse_operations(
+                set,
+                unset,
+                add_tag,
+                remove_tag,
+                set_body.as_deref(),
+                append_body,
+                *clear_body,
+            )?;
+            let sep = body_separator
+                .as_deref()
+                .map(commands::update::unescape_separator);
             commands::update::run_update(
                 &vault,
                 folder,
                 where_exprs,
                 &ops,
+                sep.as_deref(),
                 cli.dry_run,
                 cli.recursive,
                 cli.verbose,

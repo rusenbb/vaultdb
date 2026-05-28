@@ -185,6 +185,12 @@ pub enum Command {
         /// Set frontmatter fields (FIELD=VALUE), applied on top of template
         #[arg(long, num_args = 1)]
         set: Vec<String>,
+
+        /// Body content for the new note. Overrides the template's body
+        /// (frontmatter is still merged) and the default "# {name}"
+        /// placeholder. Written verbatim.
+        #[arg(long)]
+        body: Option<String>,
     },
 
     /// Rename a note and auto-update all wiki-links across the vault
@@ -200,7 +206,7 @@ pub enum Command {
         folder: String,
     },
 
-    /// Update frontmatter fields on matching records
+    /// Update frontmatter fields and/or body on matching records
     Update {
         /// Folder to update in
         folder: String,
@@ -224,6 +230,28 @@ pub enum Command {
         /// Remove a tag
         #[arg(long = "remove-tag", num_args = 1)]
         remove_tag: Vec<String>,
+
+        /// Replace the body with this text (everything after the
+        /// closing `---` of the frontmatter). Written verbatim.
+        #[arg(long = "set-body")]
+        set_body: Option<String>,
+
+        /// Append this text to the existing body, joined by
+        /// `--body-separator` (default `\n`). Repeatable.
+        #[arg(long = "append-body", num_args = 1)]
+        append_body: Vec<String>,
+
+        /// Clear the body entirely. Applied before `--set-body` /
+        /// `--append-body` in the same call.
+        #[arg(long = "clear-body")]
+        clear_body: bool,
+
+        /// Separator between existing body and each appended chunk.
+        /// Default `\n` (compact join). Pass `\n\n` for a blank-line
+        /// section break. Escape sequences are interpreted: `\n`
+        /// becomes a newline, `\t` a tab.
+        #[arg(long = "body-separator")]
+        body_separator: Option<String>,
     },
 
     /// Move matching files to another folder

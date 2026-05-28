@@ -43,7 +43,9 @@ pub struct MutationError {
 
 /// Build an update mutation. The `filter` selects records; the chained
 /// `set`/`unset`/`add_tag`/`remove_tag` calls accumulate operations applied
-/// to each matching record's frontmatter.
+/// to each matching record's frontmatter. Body mutations
+/// (`set_body`/`append_body`/`clear_body`) operate on the markdown
+/// section after the frontmatter.
 #[derive(Debug, Clone)]
 pub struct UpdateBuilder {
     filter: Expr,
@@ -52,6 +54,18 @@ pub struct UpdateBuilder {
     unset_fields: Vec<String>,
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
+    /// Body mutation, applied in the order: clear → set → append. At
+    /// most one of `clear_body` / `set_body` makes sense in a single
+    /// call (clear is `set_body("")`), but the order is well-defined
+    /// if both are present.
+    clear_body: bool,
+    set_body: Option<String>,
+    append_body: Vec<String>,
+    /// Separator inserted between the existing body and each appended
+    /// text. Default `"\n"`. Applies to every `append_body` op in this
+    /// builder uniformly — a builder that mixes log-style and section-
+    /// break appends should make two `execute` calls.
+    body_separator: String,
     vault_schema: Option<crate::schema::VaultSchema>,
     write_options: writer::WriteOptions,
     recursive: bool,
@@ -66,6 +80,10 @@ impl UpdateBuilder {
             unset_fields: Vec::new(),
             add_tags: Vec::new(),
             remove_tags: Vec::new(),
+            clear_body: false,
+            set_body: None,
+            append_body: Vec::new(),
+            body_separator: "\n".to_string(),
             vault_schema: None,
             write_options: writer::WriteOptions::default(),
             recursive: false,
@@ -98,6 +116,42 @@ impl UpdateBuilder {
 
     pub fn remove_tag(mut self, tag: impl Into<String>) -> Self {
         self.remove_tags.push(tag.into());
+        self
+    }
+
+    /// Replace the body (everything after the closing `---` of the
+    /// frontmatter) with `text`. Written verbatim — include a trailing
+    /// newline in `text` if you want one on disk.
+    pub fn set_body(mut self, text: impl Into<String>) -> Self {
+        self.set_body = Some(text.into());
+        self
+    }
+
+    /// Append `text` to the existing body, joined by the configured
+    /// separator (default `"\n"`). Multiple calls accumulate; each
+    /// appended chunk is joined to the running body via the same
+    /// separator. Empty bodies receive `text` as-is (no leading
+    /// separator).
+    pub fn append_body(mut self, text: impl Into<String>) -> Self {
+        self.append_body.push(text.into());
+        self
+    }
+
+    /// Clear the body entirely. Applied before `set_body` / `append_body`
+    /// in the same builder, so a chain like
+    /// `.clear_body().append_body("…")` is equivalent to `.set_body("…")`.
+    pub fn clear_body(mut self) -> Self {
+        self.clear_body = true;
+        self
+    }
+
+    /// Override the separator used between the existing body and each
+    /// appended chunk. Default `"\n"` (compact join — one newline
+    /// between old and new content, even if the existing body had a
+    /// trailing newline). Pass `"\n\n"` for a blank-line / section-break
+    /// separator.
+    pub fn body_separator(mut self, sep: impl Into<String>) -> Self {
+        self.body_separator = sep.into();
         self
     }
 
@@ -276,6 +330,31 @@ impl UpdateBuilder {
                 }
                 for tag in &self.remove_tags {
                     let (new_content, change) = writer::remove_tag(&content, tag)?;
+                    description_parts.push(format!("{}", change));
+                    wr_changes.push(change);
+                    content = new_content;
+                }
+                // Body mutations apply after frontmatter ops so the
+                // frontmatter edits land on the same record that's
+                // about to get its body rewritten. Order within body
+                // ops: clear → set → append. `clear` + `set` is
+                // redundant but well-defined (set wins). `set` +
+                // `append` produces `set_text + sep + append_text`.
+                if self.clear_body {
+                    let (new_content, change) = writer::clear_body(&content)?;
+                    description_parts.push(format!("{}", change));
+                    wr_changes.push(change);
+                    content = new_content;
+                }
+                if let Some(text) = &self.set_body {
+                    let (new_content, change) = writer::set_body(&content, text)?;
+                    description_parts.push(format!("{}", change));
+                    wr_changes.push(change);
+                    content = new_content;
+                }
+                for text in &self.append_body {
+                    let (new_content, change) =
+                        writer::append_body(&content, text, &self.body_separator)?;
                     description_parts.push(format!("{}", change));
                     wr_changes.push(change);
                     content = new_content;
@@ -875,6 +954,10 @@ pub struct CreateBuilder {
     name: String,
     template: Option<String>,
     set_fields: Vec<(String, Value)>,
+    /// Explicit body content. When set, overrides the template's body
+    /// (or the default `"\n# {name}\n"` body when no template is in use).
+    /// Written verbatim — include a trailing newline if desired.
+    body: Option<String>,
     vault_schema: Option<crate::schema::VaultSchema>,
     write_options: writer::WriteOptions,
 }
@@ -886,9 +969,17 @@ impl CreateBuilder {
             name: name.into(),
             template: None,
             set_fields: Vec::new(),
+            body: None,
             vault_schema: None,
             write_options: writer::WriteOptions::default(),
         }
+    }
+
+    /// Set the body content. Overrides the template's body (if any) and
+    /// the default `# {name}` placeholder. Written verbatim.
+    pub fn body(mut self, text: impl Into<String>) -> Self {
+        self.body = Some(text.into());
+        self
     }
 
     /// Path to a template file, relative to the vault root. The
@@ -1004,8 +1095,11 @@ impl CreateBuilder {
 
         // 1. Template — parse its frontmatter into a typed map, keep
         //    its body verbatim. No template → empty map + minimal body
-        //    (`# {name}` so the note isn't blank).
-        let (mut fields, body) = match &self.template {
+        //    (`# {name}` so the note isn't blank). An explicit
+        //    `body(...)` setter overrides the template's body (and the
+        //    default placeholder) — frontmatter is still merged from
+        //    the template if one was supplied.
+        let (mut fields, mut body) = match &self.template {
             Some(tmpl) => {
                 let tmpl_path = vault.root.join(tmpl);
                 if !tmpl_path.is_file() {
@@ -1023,6 +1117,9 @@ impl CreateBuilder {
                 format!("\n# {}\n", self.name),
             ),
         };
+        if let Some(explicit) = &self.body {
+            body = explicit.clone();
+        }
 
         // 2. --set overrides.
         for (k, v) in &self.set_fields {
@@ -1426,6 +1523,208 @@ mod tests {
         assert!(deep.changes[0].path.ends_with("deep.md"));
         let written = fs::read_to_string(dir.path().join("notes/sub/deep.md")).unwrap();
         assert!(written.contains("status: new"), "got:\n{}", written);
+    }
+
+    // ── Body mutations (UpdateBuilder) ────────────────────────────────────
+
+    #[test]
+    fn update_builder_set_body_replaces_existing() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/log.md"),
+            "---\nstatus: active\n---\nOld body.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("log".into()),
+        });
+        let report = UpdateBuilder::new("notes", filter)
+            .set_body("Replacement.\n")
+            .execute(&vault)
+            .unwrap();
+        assert_eq!(report.errors.len(), 0);
+        assert_eq!(report.changes.len(), 1);
+
+        let after = fs::read_to_string(dir.path().join("notes/log.md")).unwrap();
+        assert!(after.contains("status: active"));
+        assert!(!after.contains("Old body"));
+        assert!(after.ends_with("---\nReplacement.\n"));
+    }
+
+    #[test]
+    fn update_builder_append_body_uses_default_newline_separator() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/journal.md"),
+            "---\nstatus: open\n---\nEntry 1.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("journal".into()),
+        });
+        UpdateBuilder::new("notes", filter)
+            .append_body("Entry 2.")
+            .execute(&vault)
+            .unwrap();
+
+        let after = fs::read_to_string(dir.path().join("notes/journal.md")).unwrap();
+        assert!(after.ends_with("Entry 1.\nEntry 2."));
+    }
+
+    #[test]
+    fn update_builder_append_body_with_blank_line_separator() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/n.md"),
+            "---\nstatus: x\n---\nSection 1.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("n".into()),
+        });
+        UpdateBuilder::new("notes", filter)
+            .body_separator("\n\n")
+            .append_body("Section 2.")
+            .execute(&vault)
+            .unwrap();
+
+        let after = fs::read_to_string(dir.path().join("notes/n.md")).unwrap();
+        assert!(after.ends_with("Section 1.\n\nSection 2."));
+    }
+
+    #[test]
+    fn update_builder_clear_body_keeps_frontmatter() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/temp.md"),
+            "---\nstatus: x\n---\nLots of body content.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("temp".into()),
+        });
+        UpdateBuilder::new("notes", filter)
+            .clear_body()
+            .execute(&vault)
+            .unwrap();
+
+        let after = fs::read_to_string(dir.path().join("notes/temp.md")).unwrap();
+        assert!(after.contains("status: x"));
+        assert!(!after.contains("body content"));
+        assert!(after.ends_with("---\n"));
+    }
+
+    #[test]
+    fn update_builder_clear_then_append_replaces_body() {
+        // clear → append is the documented equivalent of set_body for
+        // callers that arrive at the operation incrementally.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(dir.path().join("notes/x.md"), "---\nstatus: x\n---\nOld.\n").unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("x".into()),
+        });
+        UpdateBuilder::new("notes", filter)
+            .clear_body()
+            .append_body("Fresh.")
+            .execute(&vault)
+            .unwrap();
+
+        let after = fs::read_to_string(dir.path().join("notes/x.md")).unwrap();
+        assert!(after.ends_with("---\nFresh."));
+        assert!(!after.contains("Old."));
+    }
+
+    #[test]
+    fn update_builder_body_op_combines_with_frontmatter_op() {
+        // A single update can touch both frontmatter and body. Both
+        // changes must land on the same write — no double rewrite,
+        // no losing one because of the other.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/n.md"),
+            "---\nstatus: open\n---\nOriginal.\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("n".into()),
+        });
+        UpdateBuilder::new("notes", filter)
+            .set("status", Value::String("done".into()))
+            .append_body("Update log entry.")
+            .execute(&vault)
+            .unwrap();
+
+        let after = fs::read_to_string(dir.path().join("notes/n.md")).unwrap();
+        assert!(after.contains("status: done"));
+        assert!(after.contains("Original."));
+        assert!(after.contains("Update log entry."));
+    }
+
+    #[test]
+    fn update_builder_append_body_on_empty_body() {
+        // Note with frontmatter but no body. Append should populate it
+        // with the new text and no leading separator.
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        fs::create_dir(dir.path().join("notes")).unwrap();
+        fs::write(dir.path().join("notes/empty.md"), "---\nstatus: x\n---\n").unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+
+        let filter = Expr::Predicate(Predicate::Equals {
+            field: "_name".into(),
+            value: Value::String("empty".into()),
+        });
+        UpdateBuilder::new("notes", filter)
+            .append_body("First entry.")
+            .execute(&vault)
+            .unwrap();
+
+        let after = fs::read_to_string(dir.path().join("notes/empty.md")).unwrap();
+        assert_eq!(after, "---\nstatus: x\n---\nFirst entry.");
     }
 
     #[test]
@@ -2131,6 +2430,45 @@ mod tests {
         let c = content.unwrap();
         assert!(c.contains("director: DV"));
         assert!(c.contains("db-table: movie")); // default applied even in plan
+    }
+
+    #[test]
+    fn create_with_explicit_body_overrides_default() {
+        // No template, but body() is set — the default "# {name}"
+        // placeholder must be replaced.
+        let dir = vault_with_obsidian();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        CreateBuilder::new("notes", "today")
+            .body("- [ ] Wake up\n- [ ] Write code\n")
+            .execute(&vault)
+            .unwrap();
+        let content = std::fs::read_to_string(dir.path().join("notes/today.md")).unwrap();
+        assert!(content.contains("- [ ] Wake up"));
+        // The default placeholder must NOT appear.
+        assert!(!content.contains("# today"));
+    }
+
+    #[test]
+    fn create_with_explicit_body_overrides_template_body() {
+        // body() wins over template body, but template frontmatter is
+        // still merged.
+        let dir = vault_with_obsidian();
+        std::fs::create_dir_all(dir.path().join("templates")).unwrap();
+        std::fs::write(
+            dir.path().join("templates/note.md"),
+            "---\nstatus: open\n---\n\n# Template body\n",
+        )
+        .unwrap();
+        let vault = Vault::with_root(dir.path().to_path_buf());
+        CreateBuilder::new("notes", "n")
+            .template("templates/note.md")
+            .body("Custom body.\n")
+            .execute(&vault)
+            .unwrap();
+        let content = std::fs::read_to_string(dir.path().join("notes/n.md")).unwrap();
+        assert!(content.contains("status: open")); // template fm survived
+        assert!(content.contains("Custom body."));
+        assert!(!content.contains("Template body"));
     }
 
     #[test]

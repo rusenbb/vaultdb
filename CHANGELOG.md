@@ -5,6 +5,57 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.0] — Body writes: append / overwrite / clear; create with body
+
+### Added
+
+- **Body mutations on `UpdateBuilder`.** Three new builder methods cover the
+  full edit surface for the markdown body (everything after the closing `---`
+  of the frontmatter):
+  - `.set_body(text)` — overwrite the body verbatim.
+  - `.append_body(text)` — append, joined to the existing body by a
+    caller-chosen separator. Default `"\n"` (compact join, idempotent against
+    files that already end with a newline); override via
+    `.body_separator("\n\n")` for a blank-line section break.
+  - `.clear_body()` — drop the body entirely; frontmatter is preserved.
+  All three play cleanly with frontmatter ops in the same call — a single
+  `execute()` can re-tag a record AND log an entry to its body in one atomic
+  write.
+- **`CreateBuilder::body(text)`.** Explicit body content for new notes.
+  Overrides the template's body (frontmatter is still merged) and the default
+  `# {name}` placeholder. Written verbatim.
+- **CLI `update` body flags.** `--set-body`, `--append-body` (repeatable),
+  `--clear-body`, `--body-separator` (with the usual `\n` / `\t` / `\r` /
+  `\\` escape interpretation, since literal newlines are awkward in shells).
+- **CLI `create --body`.** Body content for new notes from the command line.
+- **MCP `plan_update` / `execute_update` body params.** `set_body`
+  (`Option<String>`), `append_body` (`Vec<String>`), `clear_body` (`bool`),
+  `body_separator` (`Option<String>`). Value is taken verbatim — no escape
+  interpretation at the MCP boundary (clients can send `"\n"` literally in
+  JSON if they want).
+- **MCP `plan_create` / `execute_create` body param.** `body`
+  (`Option<String>`) for setting the new note's body content.
+- **`writer::set_body` / `writer::append_body` / `writer::clear_body`
+  primitives.** The body-region counterparts to `set_field` / `add_tag` /
+  `unset_field`. They preserve frontmatter byte-for-byte and the file's
+  line-ending style. Bare files (no frontmatter delimiters) get an empty
+  frontmatter synthesized, matching `set_field`'s behaviour.
+
+### Behaviour notes
+
+- Body op order within a single `UpdateBuilder` call is: clear → set →
+  append. So `.clear_body().append_body("X")` is equivalent to
+  `.set_body("X")`; `.set_body("X").append_body("Y")` produces `X{sep}Y`.
+- `append_body` trims trailing `\n` / `\r` from the existing body before
+  joining with the separator. The result is that repeated appends with the
+  default `"\n"` separator don't accumulate blank lines, even if every
+  appended chunk ends with its own newline.
+- `set_body` writes the text verbatim — no auto-trailing-newline. Callers
+  that want a final newline on disk should include it in the text.
+- Records without valid frontmatter still don't match update filters (the
+  loader requires frontmatter to materialize a record), so the bare-file
+  synthesise path is mostly exercised by direct writer tests.
+
 ## [1.5.0] — Queryable body links: `_body_links` + element-wise list `matches`
 
 ### Added

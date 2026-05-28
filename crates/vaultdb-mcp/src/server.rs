@@ -292,7 +292,7 @@ impl VaultdbServer {
     // expected to run the equivalent execute() if the plan is approved.
 
     #[tool(
-        description = "Plan-only update. Shows what an update would change without writing. Set fields with field=value strings. Use add_tag/remove_tag for the tags list."
+        description = "Plan-only update. Shows what an update would change without writing. Set frontmatter fields with `set`/`set_typed`; manage the tags list with `add_tag`/`remove_tag`. Body ops: `set_body` to overwrite, `append_body` to append (joined by `body_separator`, default `\\n`), `clear_body` to drop. Body and frontmatter ops can be combined in one call."
     )]
     fn plan_update(&self, params: Parameters<PlanUpdateParams>) -> Result<String, ErrorData> {
         json_string(tools::mutations::plan_update(self.vault()?, params.0)?)
@@ -320,7 +320,7 @@ impl VaultdbServer {
     }
 
     #[tool(
-        description = "Plan-only create. Shows the file that would be written to <folder>/<name>.md including schema-defaulted fields and required-field checks. Does NOT write. `set` is a typed JSON object: {\"director\":\"...\", \"year\":2021}."
+        description = "Plan-only create. Shows the file that would be written to <folder>/<name>.md including schema-defaulted fields and required-field checks. Does NOT write. `set` is a typed JSON object: {\"director\":\"...\", \"year\":2021}. Pass `body` to set the note's body content (overrides the template's body and the default `# {name}` placeholder; written verbatim)."
     )]
     fn plan_create(&self, params: Parameters<PlanCreateParams>) -> Result<String, ErrorData> {
         json_string(tools::mutations::plan_create(self.vault()?, params.0)?)

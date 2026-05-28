@@ -191,6 +191,22 @@ pub struct PlanUpdateParams {
     /// Tags to remove from the `tags` list.
     #[serde(default)]
     pub remove_tag: Vec<String>,
+    /// Replace the body (everything after the closing `---` of the
+    /// frontmatter) with this text. Written verbatim.
+    #[serde(default)]
+    pub set_body: Option<String>,
+    /// Append each entry to the body, joined by `body_separator`
+    /// (default `"\n"`). Multiple entries accumulate.
+    #[serde(default)]
+    pub append_body: Vec<String>,
+    /// Clear the body entirely. Applied before `set_body` / `append_body`.
+    #[serde(default)]
+    pub clear_body: bool,
+    /// Separator inserted between the existing body and each appended
+    /// chunk. Default `"\n"`. Pass `"\n\n"` for a blank-line section
+    /// break. The value is taken verbatim — no escape interpretation.
+    #[serde(default)]
+    pub body_separator: Option<String>,
     /// Recurse into subfolders when selecting records to update (default
     /// false — only files directly in `folder` are considered).
     #[serde(default)]
@@ -251,4 +267,9 @@ pub struct PlanCreateParams {
     /// lists, objects become maps.
     #[serde(default)]
     pub set: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Optional body content for the new note. Overrides the template's
+    /// body (frontmatter is still merged) and the default `# {name}`
+    /// placeholder. Written verbatim.
+    #[serde(default)]
+    pub body: Option<String>,
 }

@@ -329,6 +329,22 @@ vaultdb update 3-Notes --where "director contains Chaplin" --add-tag "director/c
 # Remove a field
 vaultdb update 3-Notes --where "_name = React" --unset "deprecated" --dry-run
 
+# Replace the body (bash ANSI-C quoting `$'...'` lets you embed real newlines)
+vaultdb update 3-Notes --where "_name = React" --set-body $'# React\n\nRewritten.\n' --dry-run
+
+# Append to the body (default separator: a single \n; override with --body-separator)
+vaultdb update 5-Tasks --where "_name = 2026-05-28" --append-body "- [ ] follow up" --dry-run
+
+# Append with a blank-line section break instead
+vaultdb update 5-Tasks --where "_name = 2026-05-28" \
+  --body-separator '\n\n' --append-body "## Notes" --dry-run
+
+# Clear the body, keep the frontmatter
+vaultdb update 3-Notes --where "_name = Scratch" --clear-body --dry-run
+
+# Create a note with explicit body content
+vaultdb create 5-Tasks --name "2026-05-28" --body $'## Today\n- [ ] write code\n'
+
 # Move files
 vaultdb move 5-Tasks --where "_name startswith 2026-02" --to 5-Tasks/archive --dry-run
 
